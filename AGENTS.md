@@ -72,6 +72,9 @@
 | `scripts/orchestrater.py` | Orca terminal registry, list, add, dispatch 的确定性脚本. |
 | `agents/openai.yaml` | Codex/OpenAI UI skill 元数据. |
 | `.orchestrater/agents.json` | 项目级 agent registry, 首次运行时生成, 可提交. |
+| `.orchestrater/sessions.json` | 当前 worktree 中 agent terminal 状态快照. |
+| `.orchestrater/tasks.jsonl` | append-only 任务生命周期事件. |
+| `.orchestrater/decisions.jsonl` | append-only 决策, 阻塞, 用户确认和最终摘要. |
 | `.agents/` | 本地使用的外部 skill/tooling 目录, 已忽略, 不是项目代码. |
 
 ### 5.2 参考资料
@@ -93,6 +96,8 @@
 | `rg -n \"\\{\\{\" constitution.md AGENTS.md CODEX.md` | 检查治理文档没有残留模板占位符. |
 | `python3 -m py_compile scripts/orchestrater.py` | 检查 orchestrater 脚本语法. |
 | `python3 /Users/sivan/.codex/skills/.system/skill-creator/scripts/quick_validate.py .` | 校验 skill 结构. |
+| `python3 scripts/orchestrater.py --root "$(mktemp -d)" --init` | 在临时目录验证 registry 初始化. |
+| `python3 scripts/orchestrater.py --root "$(mktemp -d)" --agent codex --dry-run "Check"` | 验证 dry-run dispatch 不触发真实 Orca agent. |
 
 当前未检测到 package manifest 或 Makefile. 脚本验证以 Python stdlib 和 skill validator 为主.
 
@@ -125,6 +130,8 @@
 - 默认在当前 Orca worktree 中启动多个 agent terminal, 不创建新 worktree.
 - 默认 agent 为 `codex`, `claude`, `agy`; 不默认包含 `gemini`.
 - agent session 复用顺序: cached terminal handle -> terminal title -> lazy create.
+- 一次编排任务的结构化阶段: intake -> assign -> dispatch -> collect -> synthesize -> close.
+- 持久化状态分为 agents, sessions, tasks, decisions 四类.
 
 <!-- source: template/dim-code -->
 

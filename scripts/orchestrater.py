@@ -12,10 +12,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 CONFIG_DIR = ".orchestrater"
 CONFIG_FILE = "agents.json"
+SESSIONS_FILE = "sessions.json"
+TASKS_FILE = "tasks.jsonl"
+DECISIONS_FILE = "decisions.jsonl"
 DEFAULT_AGENTS = [
     {"name": "codex", "command": "codex", "role": "implementation"},
     {"name": "claude", "command": "claude", "role": "review"},
@@ -42,6 +46,14 @@ def utc_now() -> str:
 
 def config_path(root: Path) -> Path:
     return root / CONFIG_DIR / CONFIG_FILE
+
+
+def state_path(root: Path, filename: str) -> Path:
+    return root / CONFIG_DIR / filename
+
+
+def task_id() -> str:
+    return f"task-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
 
 
 def default_config() -> dict[str, Any]:
@@ -90,6 +102,44 @@ def save_config(root: Path, cfg: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(cfg, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
+
+
+def load_json(root: Path, filename: str, default: dict[str, Any]) -> dict[str, Any]:
+    path = state_path(root, filename)
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save_json(root: Path, filename: str, data: dict[str, Any]) -> None:
+    path = state_path(root, filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+
+
+def append_jsonl(root: Path, filename: str, event: dict[str, Any]) -> None:
+    path = state_path(root, filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        json.dump(event, handle, ensure_ascii=False, sort_keys=True)
+        handle.write("\n")
+
+
+def read_jsonl(root: Path, filename: str) -> list[dict[str, Any]]:
+    path = state_path(root, filename)
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw:
+                continue
+            events.append(json.loads(raw))
+    return events
 
 
 def agent_map(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -232,11 +282,26 @@ def parse_agent_spec(raw: str | None, cfg: dict[str, Any]) -> list[tuple[str, st
     return selected
 
 
-def build_prompt(agent: dict[str, Any], task: str, override_role: str | None, multi: bool) -> str:
-    lines = [f"You are the {agent['name']} agent in the current Orca worktree."]
+def build_prompt(agent: dict[str, Any], task: str, override_role: str | None, multi: bool, current_task_id: str) -> str:
+    expected = "Return concise findings, actions taken, blockers, and next recommended step."
+    if override_role:
+        expected = f"Act as {override_role}. Return concise findings, actions taken, blockers, and next recommended step."
+    lines = [
+        f"Task ID: {current_task_id}",
+        f"You are the {agent['name']} agent in the current Orca worktree.",
+    ]
     if override_role:
         lines.append(f"Role for this task: {override_role}.")
-    lines.extend(["Task:", task])
+    lines.extend(
+        [
+            "Shared Goal:",
+            task,
+            "Expected Output:",
+            expected,
+            "Coordination Rule:",
+            "Do not modify shared orchestration state unless the user or coordinator explicitly asks. Reference the Task ID in your response.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -286,6 +351,87 @@ def print_agent_list(cfg: dict[str, Any], terminals: list[dict[str, Any]] | None
         )
 
 
+def update_session(
+    root: Path,
+    agent: dict[str, Any],
+    status: str,
+    handle: str | None,
+    current_task_id: str | None,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        return
+    sessions = load_json(root, SESSIONS_FILE, {"version": 1, "sessions": {}})
+    sessions.setdefault("sessions", {})[agent["name"]] = {
+        "agent": agent["name"],
+        "handle": handle,
+        "title": agent.get("title"),
+        "status": status,
+        "lastSeenAt": utc_now(),
+        "lastTaskId": current_task_id,
+    }
+    save_json(root, SESSIONS_FILE, sessions)
+
+
+def append_task_event(root: Path, current_task_id: str, event_type: str, payload: dict[str, Any], dry_run: bool) -> None:
+    if dry_run:
+        return
+    append_jsonl(
+        root,
+        TASKS_FILE,
+        {
+            "time": utc_now(),
+            "taskId": current_task_id,
+            "type": event_type,
+            **payload,
+        },
+    )
+
+
+def append_decision(root: Path, current_task_id: str, kind: str, text: str) -> None:
+    append_jsonl(
+        root,
+        DECISIONS_FILE,
+        {
+            "time": utc_now(),
+            "taskId": current_task_id,
+            "kind": kind,
+            "text": text,
+        },
+    )
+
+
+def print_status(root: Path, limit: int) -> None:
+    sessions = load_json(root, SESSIONS_FILE, {"version": 1, "sessions": {}})
+    task_events = read_jsonl(root, TASKS_FILE)
+    decisions = read_jsonl(root, DECISIONS_FILE)
+
+    print("Sessions:")
+    if sessions.get("sessions"):
+        for name, session in sorted(sessions["sessions"].items()):
+            print(
+                f"- {name}: status={session.get('status')}, handle={session.get('handle')}, "
+                f"lastTaskId={session.get('lastTaskId')}, lastSeenAt={session.get('lastSeenAt')}"
+            )
+    else:
+        print("- none")
+
+    print("\nRecent task events:")
+    for event in task_events[-limit:]:
+        print(
+            f"- {event.get('time')} {event.get('taskId')} {event.get('type')}: "
+            f"{event.get('agent') or event.get('status') or event.get('goal', '')}"
+        )
+    if not task_events:
+        print("- none")
+
+    print("\nRecent decisions:")
+    for event in decisions[-limit:]:
+        print(f"- {event.get('time')} {event.get('taskId')} {event.get('kind')}: {event.get('text')}")
+    if not decisions:
+        print("- none")
+
+
 def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | None]], task: str, dry_run: bool) -> int:
     ensure_orca_ready(dry_run)
     terminals = list_terminals(dry_run)
@@ -297,6 +443,20 @@ def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | No
             + ", ".join(missing)
             + ". Add them with `--add <name> --command \"<cmd>\"`."
         )
+
+    current_task_id = task_id()
+    append_task_event(
+        root,
+        current_task_id,
+        "intake",
+        {
+            "goal": task,
+            "agents": [{"name": name, "role": role} for name, role in selected],
+            "status": "open",
+        },
+        dry_run,
+    )
+    append_task_event(root, current_task_id, "assign", {"phase": "assign"}, dry_run)
 
     failures = 0
     multi = len(selected) > 1
@@ -310,18 +470,45 @@ def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | No
             handle = term.get("handle")
             if not handle:
                 raise OrchestraterError(f"No terminal handle available for {name}.")
-            prompt = build_prompt(agent, task, role, multi=multi)
+            prompt = build_prompt(agent, task, role, multi=multi, current_task_id=current_task_id)
             send_task(handle, prompt, dry_run=dry_run)
             if not dry_run:
                 agent["terminalHandle"] = handle
                 agent["lastSeenAt"] = utc_now()
+            update_session(root, agent, "live", handle, current_task_id, dry_run)
+            append_task_event(
+                root,
+                current_task_id,
+                "dispatch",
+                {"agent": name, "role": role, "source": source, "handle": handle, "status": "sent"},
+                dry_run,
+            )
             print(f"{name}: dispatched via {source} ({handle})")
         except OrchestraterError as exc:
             failures += 1
+            update_session(root, agent, "failed", agent.get("terminalHandle"), current_task_id, dry_run)
+            append_task_event(
+                root,
+                current_task_id,
+                "dispatch",
+                {"agent": name, "role": role, "status": "failed", "error": str(exc)},
+                dry_run,
+            )
             print(f"{name}: failed: {exc}", file=sys.stderr)
 
+    append_task_event(
+        root,
+        current_task_id,
+        "collect",
+        {
+            "status": "pending",
+            "note": "Collect agent responses from their Orca terminals, then record decisions or close the task.",
+        },
+        dry_run,
+    )
     if not dry_run:
         save_config(root, cfg)
+    print(f"taskId: {current_task_id}")
     return 1 if failures else 0
 
 
@@ -331,10 +518,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--root", default=".", help="Project root containing .orchestrater/agents.json.")
     parser.add_argument("--init", action="store_true", help="Initialize default registry and exit.")
     parser.add_argument("--list", action="store_true", help="List configured agents and live terminal status.")
+    parser.add_argument("--status", action="store_true", help="Show persisted sessions, recent task events, and decisions.")
+    parser.add_argument("--limit", type=int, default=10, help="Number of recent events to show with --status.")
     parser.add_argument("--add", metavar="NAME", help="Add or update an agent.")
     parser.add_argument("--command", help="Command for --add.")
     parser.add_argument("--role", help="Role for --add or selected agent override.")
     parser.add_argument("--agent", help="Agent selector, e.g. codex or codex:implement,claude:review.")
+    parser.add_argument("--task-id", help="Existing task id for --record-decision or --close.")
+    parser.add_argument("--record-decision", metavar="TEXT", help="Append a decision, blocker, or user confirmation.")
+    parser.add_argument("--decision-kind", default="decision", help="Decision kind for --record-decision.")
+    parser.add_argument("--close", action="store_true", help="Mark a task as closed in tasks.jsonl.")
+    parser.add_argument("--summary", help="Summary text for --close.")
     parser.add_argument("--dry-run", action="store_true", help="Print intended actions without calling Orca.")
     return parser.parse_args(argv)
 
@@ -365,6 +559,39 @@ def main(argv: list[str]) -> int:
         except OrchestraterError as exc:
             print(f"Live status unavailable: {exc}", file=sys.stderr)
         print_agent_list(cfg, terminals)
+        return 0
+
+    if args.status:
+        print_status(root, args.limit)
+        return 0
+
+    if args.record_decision:
+        if not args.task_id:
+            raise OrchestraterError("--record-decision requires --task-id.")
+        append_decision(root, args.task_id, args.decision_kind, args.record_decision)
+        append_task_event(
+            root,
+            args.task_id,
+            "decision",
+            {"kind": args.decision_kind, "text": args.record_decision},
+            dry_run=False,
+        )
+        print(f"Recorded {args.decision_kind} for {args.task_id}")
+        return 0
+
+    if args.close:
+        if not args.task_id:
+            raise OrchestraterError("--close requires --task-id.")
+        append_task_event(
+            root,
+            args.task_id,
+            "close",
+            {"status": "closed", "summary": args.summary or ""},
+            dry_run=False,
+        )
+        if args.summary:
+            append_decision(root, args.task_id, "final-summary", args.summary)
+        print(f"Closed {args.task_id}")
         return 0
 
     task = " ".join(args.task).strip()
