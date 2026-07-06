@@ -97,6 +97,19 @@ python3 scripts/orchestrater.py --validate-config
 
 允许同一个 agent command 扮演多个角色, 但默认每个角色使用独立 `terminalTitle` 和独立 session。不要把 Orca runtime handle 写入这个文件。
 
+`version` 是 orchestrater config schema version, 不是 Orca runtime/task version。当前只支持 `version: 1`:
+
+- 缺失必填字段或不支持的 version: 阻止 dispatch。
+- 未知字段: 允许保留, 但作为 warning, 当前 skill 忽略。
+- 配置迁移或修复只能处理项目级配置偏好, 不得修改 Orca task、dispatch、message、terminal 或 worktree runtime 状态。
+- 后续如增加 repair, 只能补安全默认值, 不删除用户字段。
+
+可在 dispatch 前运行:
+
+```bash
+python3 scripts/orchestrater.py --diagnose-config --json
+```
+
 ## 标准流程
 
 1. 确认 Orca 可用:
@@ -113,13 +126,35 @@ orca worktree current --json
 orca terminal list --worktree active --json
 ```
 
-3. 判断模式:
+3. 运行 dispatch preflight。preflight 分 blocker 和 warning:
+
+阻断项:
+
+- Orca runtime 不可用。
+- `.orchestrater/config.json` 缺失、无效或 version 不支持。
+- 目标 role 不存在, 且 `onMissingRole` 不是 `broadcast`。
+- 需要自动创建 terminal, 但配置 command 不可信且用户未确认。
+- 写任务违反单写者规则。
+- 用户要求 full handoff, 但流程进入 supervised orchestration。
+- 用户要求监督等待, 但流程进入 full handoff。
+
+警告项:
+
+- role terminal 不存在, 需要懒启动。
+- 多个 terminal 匹配同一个 `terminalTitle`。
+- 当前 worktree 有未提交改动。
+- 只读角色收到疑似写任务。
+- `auto` 策略会直接 dispatch。
+
+`plan-first` 策略下, coordinator 先输出计划、blocker 和 warning, 等用户确认。`auto` 策略下, 有 blocker 必须停止; 只有 warning 时可以继续, 但必须在汇总中报告。
+
+4. 判断模式:
 
 - 监督式协作: 用户希望多个智能体并行/分工/评审/汇总, 使用 `orca orchestration`。
 - 完整移交: 用户希望把所有权交给另一个 agent, 使用 Orca terminal send 或 worktree create prompt。
 - 轻量提示: 只需要给一个已有终端发一句话时, 可直接使用 Orca terminal。
 
-4. 监督式协作时创建任务:
+5. 监督式协作时创建任务:
 
 ```bash
 orca orchestration task-create \
@@ -130,18 +165,19 @@ orca orchestration task-create \
 
 复杂任务拆成 DAG 时, 为每个子任务创建 task, 并用 `--deps` 表达依赖关系。
 
-5. 选择 worker:
+6. 选择 worker:
 
 - 优先使用用户点名的角色或 worker。
 - 没有点名时, 按 `.orchestrater/config.json` 的角色拓扑选择。
 - 按 role 的 `terminalTitle` 复用 `orca terminal list --worktree active --json` 中已有的可写终端。
 - 找不到时, 根据 `defaults.autoCreateTerminals` 决定是否在当前 worktree 懒启动。
+- 使用配置中的 `command` 创建 terminal 前, 必须确认它是可信 agent 命令。未知命令、路径型命令或包含 shell 元字符的命令必须先展示给用户确认。
 
 ```bash
 orca terminal create --worktree active --title "orchestrater:<worker>" --command "<agent-command>" --json
 ```
 
-6. 派发任务:
+7. 派发任务:
 
 ```bash
 orca orchestration dispatch \
@@ -154,21 +190,29 @@ orca orchestration dispatch \
 
 `--inject` 会把 worker lifecycle 协议注入目标终端。worker 应通过 Orca orchestration 上报 `worker_done`, `heartbeat`, `ask`, `escalation` 等事件。
 
-7. 等待和协调:
+8. 等待和协调:
 
 ```bash
 orca orchestration check \
   --wait \
   --types worker_done,escalation,decision_gate,ask \
-  --timeout-ms 60000 \
+  --timeout-ms 600000 \
   --json
 ```
 
+默认监督等待窗口是 10 分钟。第一次 wait timeout 后, 做 liveness check, 向用户汇报一次当前状态, 让用户选择继续等待、结束并汇总、取消 task 或重新派发。用户选择继续后, 不要每个窗口重复打扰; 除非出现 ask、escalation、terminal 消失、明显长时间无活动, 或用户要求每次超时都询问。
+
 循环等待直到所有必要 worker 完成、阻塞被处理、决策门关闭或用户要求停止。遇到 worker 的阻塞问题时, 使用 `orca orchestration reply` 或 decision gate 处理, 并把需要用户判断的问题明确返回给用户。
 
-8. 汇总与收口:
+9. 验收 worker 结果并收口:
 
 - 汇总每个 worker 的输出、变更、风险、未完成事项。
+- `worker_done` 只表示 worker 自称完成, 不等于结果可信。
+- 检查 worker 是否返回 task/dispatch 关联信息、expected output、文件改动、验证结果和剩余风险。
+- 写者必须说明改动文件和验证命令/结果; 无法验证时必须明确说明。
+- review 必须列出 findings 或明确无问题。
+- 检查是否越过 `writeAccess`、`allowedPaths` 或 `forbiddenPaths`。
+- 多 worker 输出冲突时, 创建 decision gate 或向用户总结选项。
 - 必要时继续创建 follow-up task 或 dispatch review task。
 - 完成后用 Orca task 状态表达完成/取消/阻塞, 而不是写本地任务日志。
 
@@ -191,6 +235,8 @@ coordinator 必须先输出或内部形成清晰计划:
 
 默认采用单写者、多读者: 当前 worktree 中同一时间只有一个 implementation owner 可以写文件。review、research、test 和 docs 角色默认只读或产出建议。需要多个 worker 并行写时, 要求用户明确授权或改用独立 worktree。
 
+写任务不得自动重试。只读任务最多建议重试 1 次, 且必须说明原因。command 启动失败不重复试超过 1 次。不能确认无副作用时, 不重复 dispatch 同一写任务。
+
 ## Full Handoff
 
 当用户表达“交给某个智能体独立处理”“handoff”“handover”“give this to another agent”等完整移交意图时:
@@ -204,13 +250,22 @@ coordinator 必须先输出或内部形成清晰计划:
 
 `scripts/orchestrater.py` 只允许作为 skill 内部 helper 使用。它可以摘要 Orca 状态、当前 worktree、terminal 列表, 以及初始化/读取/校验 `.orchestrater/config.json`。它不能作为用户入口, 不能创建自定义任务状态, 不能替代 `orca orchestration task-create/dispatch/check`。
 
+helper 默认只输出脱敏摘要, 不返回 Orca terminal 原始 preview。只有调试时才允许显式使用:
+
+```bash
+python3 scripts/orchestrater.py --json --raw-orca
+```
+
 ## 失败处理
 
 - Orca 不可用: 报告 `orca status --json` 的失败信息, 建议用户先启动 Orca。
 - 没有可用 worker: 说明当前可见终端和缺失的 agent command, 再请求用户选择或允许启动。
+- 配置中的 worker command 不可信: 不自动创建 terminal, 先请求用户确认。
 - terminal handle 失效: 重新用 `orca terminal list --worktree active --json` 获取, 不长期信任缓存。
 - `.orchestrater/config.json` 缺失: 必须先完成首次配置问卷并写入配置。
 - 配置无效: 报告校验错误, 不派发任务。
+- 配置 version 不支持: 阻止 dispatch, 提示当前 helper/skill 不支持。
+- wait timeout: 10 分钟窗口后汇报一次并让用户选择继续或结束。
 - worker escalation: 先判断 coordinator 能否解决; 不能解决时把阻塞点交给用户。
 - task 结果冲突: 创建决策门或向用户总结冲突选项。
 - 不确定是否应创建新 worktree: 默认留在当前 worktree。

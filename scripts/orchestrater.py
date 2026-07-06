@@ -21,6 +21,31 @@ from typing import Any
 
 CONFIG_DIR = ".orchestrater"
 CONFIG_FILE = "config.json"
+SUPPORTED_CONFIG_VERSION = 1
+ORCA_TIMEOUT_SECONDS = 30
+KNOWN_AGENT_COMMANDS = {"agy", "claude", "codex", "opencode"}
+SHELL_META_CHARS = set("|&;<>`$(){}\n\r")
+KNOWN_TOP_LEVEL_KEYS = {"version", "coordinator", "defaults", "permissions", "roles"}
+KNOWN_COORDINATOR_KEYS = {"mode"}
+KNOWN_DEFAULT_KEYS = {
+    "worktree",
+    "strategy",
+    "autoCreateTerminals",
+    "onMissingRole",
+    "maxConcurrentWorkers",
+}
+KNOWN_PERMISSION_KEYS = {"writeModel", "allowParallelWrites", "defaultWriteRole"}
+KNOWN_ROLE_KEYS = {
+    "name",
+    "agent",
+    "command",
+    "terminalTitle",
+    "session",
+    "writeAccess",
+    "responsibilities",
+    "allowedPaths",
+    "forbiddenPaths",
+}
 
 
 class HelperError(RuntimeError):
@@ -49,13 +74,24 @@ def run_orca(args: list[str]) -> OrcaResult:
             data=None,
         )
 
-    proc = subprocess.run(
-        command,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        proc = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=ORCA_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return OrcaResult(
+            ok=False,
+            command=command,
+            returncode=124,
+            stdout=exc.stdout or "",
+            stderr=f"orca command timed out after {ORCA_TIMEOUT_SECONDS}s",
+            data=None,
+        )
     data: Any = None
     if proc.stdout.strip():
         try:
@@ -121,8 +157,11 @@ def load_config(root: Path) -> dict[str, Any] | None:
     path = config_path(root)
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise HelperError(f"{path} is not valid JSON: {exc.msg} at line {exc.lineno}, column {exc.colno}.") from exc
     if not isinstance(data, dict):
         raise HelperError(f"{path} must contain a JSON object.")
     return data
@@ -142,8 +181,13 @@ def save_config(root: Path, config: dict[str, Any], force: bool) -> Path:
 
 def validate_config(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if config.get("version") != 1:
-        errors.append("version must be 1.")
+    version = config.get("version")
+    if version is None:
+        errors.append("version is required.")
+    elif version != SUPPORTED_CONFIG_VERSION:
+        errors.append(
+            f"version must be {SUPPORTED_CONFIG_VERSION}; this helper cannot safely use config version {version!r}."
+        )
 
     coordinator = config.get("coordinator")
     if not isinstance(coordinator, dict):
@@ -215,13 +259,67 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     return errors
 
 
-def compact_result(result: OrcaResult) -> dict[str, Any]:
+def command_warnings(command: str) -> list[str]:
+    warnings: list[str] = []
+    executable = command.strip().split()[0] if command.strip() else ""
+    if executable not in KNOWN_AGENT_COMMANDS:
+        warnings.append(
+            f"command {command!r} is not a known agent command; confirm before auto-creating a terminal."
+        )
+    if any(char in command for char in SHELL_META_CHARS):
+        warnings.append(
+            f"command {command!r} contains shell metacharacters; require explicit user confirmation."
+        )
+    if executable.startswith("/") or executable.startswith("."):
+        warnings.append(
+            f"command {command!r} uses a path-like executable; require explicit user confirmation."
+        )
+    return warnings
+
+
+def config_warnings(config: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    unknown_top = sorted(set(config) - KNOWN_TOP_LEVEL_KEYS)
+    for key in unknown_top:
+        warnings.append(f"unknown top-level field {key!r} will be preserved but ignored.")
+
+    coordinator = config.get("coordinator")
+    if isinstance(coordinator, dict):
+        for key in sorted(set(coordinator) - KNOWN_COORDINATOR_KEYS):
+            warnings.append(f"coordinator.{key} is unknown and will be ignored.")
+
+    defaults = config.get("defaults")
+    if isinstance(defaults, dict):
+        for key in sorted(set(defaults) - KNOWN_DEFAULT_KEYS):
+            warnings.append(f"defaults.{key} is unknown and will be ignored.")
+
+    permissions = config.get("permissions")
+    if isinstance(permissions, dict):
+        for key in sorted(set(permissions) - KNOWN_PERMISSION_KEYS):
+            warnings.append(f"permissions.{key} is unknown and will be ignored.")
+
+    roles = config.get("roles")
+    if not isinstance(roles, list):
+        return warnings
+    for idx, role in enumerate(roles):
+        if not isinstance(role, dict):
+            continue
+        for key in sorted(set(role) - KNOWN_ROLE_KEYS):
+            warnings.append(f"roles[{idx}].{key} is unknown and will be ignored.")
+        command = role.get("command")
+        if isinstance(command, str):
+            for warning in command_warnings(command):
+                warnings.append(f"roles[{idx}].command: {warning}")
+    return warnings
+
+
+def compact_result(result: OrcaResult, include_data: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ok": result.ok,
         "command": result.command,
         "returncode": result.returncode,
     }
-    if result.data is not None:
+    if include_data and result.data is not None:
         payload["data"] = result.data
     if result.stderr.strip():
         payload["stderr"] = result.stderr.strip()
@@ -259,17 +357,16 @@ def summarize_terminals(data: Any) -> list[dict[str, Any]]:
     return summary
 
 
-def inspect_environment() -> dict[str, Any]:
+def inspect_environment(raw_orca: bool) -> dict[str, Any]:
     status = run_orca(["status", "--json"])
     worktree = run_orca(["worktree", "current", "--json"]) if status.ok else None
     terminals = run_orca(["terminal", "list", "--worktree", "active", "--json"]) if status.ok else None
 
-    return {
+    summary = {
         "helper": "orchestrater",
         "purpose": "environment-and-config-helper",
-        "orca": compact_result(status),
-        "worktree": compact_result(worktree) if worktree else None,
-        "terminals": compact_result(terminals) if terminals else None,
+        "orca": compact_result(status, include_data=raw_orca),
+        "worktree": compact_result(worktree, include_data=raw_orca) if worktree else None,
         "terminalSummary": summarize_terminals(terminals.data) if terminals else [],
         "nextStep": (
             "Use native `orca orchestration task-create`, `dispatch --inject`, and `check --wait`."
@@ -277,6 +374,9 @@ def inspect_environment() -> dict[str, Any]:
             else "Start Orca or fix PATH before invoking /orchestrater."
         ),
     }
+    if raw_orca:
+        summary["terminals"] = compact_result(terminals, include_data=True) if terminals else None
+    return summary
 
 
 def inspect_config(root: Path) -> dict[str, Any]:
@@ -288,10 +388,42 @@ def inspect_config(root: Path) -> dict[str, Any]:
             "nextStep": "Run first-use onboarding, then write .orchestrater/config.json.",
         }
     validate_config(config)
+    warnings = config_warnings(config)
     return {
         "exists": True,
         "path": str(config_path(root)),
         "config": config,
+        "warnings": warnings,
+    }
+
+
+def diagnose_config(root: Path) -> dict[str, Any]:
+    config = load_config(root)
+    if config is None:
+        return {
+            "ok": False,
+            "path": str(config_path(root)),
+            "blockers": ["config file does not exist; first-use onboarding is required."],
+            "warnings": [],
+        }
+
+    try:
+        validate_config(config)
+    except HelperError as exc:
+        return {
+            "ok": False,
+            "path": str(config_path(root)),
+            "blockers": str(exc).splitlines(),
+            "warnings": config_warnings(config),
+        }
+
+    return {
+        "ok": True,
+        "path": str(config_path(root)),
+        "schemaVersion": config.get("version"),
+        "blockers": [],
+        "warnings": config_warnings(config),
+        "preflightNote": "Runtime dispatch preflight must still check Orca status, worker terminals, mode, write access, and user confirmations.",
     }
 
 
@@ -329,16 +461,41 @@ def print_config_text(config_summary: dict[str, Any]) -> None:
     for role in config["roles"]:
         write = "write" if role["writeAccess"] else "read-only"
         print(f"- {role['name']}: {role['agent']} via {role['terminalTitle']} ({write})")
+    warnings = config_summary.get("warnings") or []
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
+
+
+def print_diagnosis_text(diagnosis: dict[str, Any]) -> None:
+    print(f"Config path: {diagnosis['path']}")
+    print(f"Config ok: {diagnosis['ok']}")
+    blockers = diagnosis.get("blockers") or []
+    if blockers:
+        print("Blockers:")
+        for blocker in blockers:
+            print(f"- {blocker}")
+    warnings = diagnosis.get("warnings") or []
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
+    note = diagnosis.get("preflightNote")
+    if note:
+        print(note)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect Orca state for the /orchestrater skill.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output.")
+    parser.add_argument("--raw-orca", action="store_true", help="Include raw Orca RPC payloads in environment output.")
     parser.add_argument("--root", default=".", help="Project root containing .orchestrater/config.json.")
     parser.add_argument("--init-config", action="store_true", help="Create default .orchestrater/config.json.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing config with --init-config.")
     parser.add_argument("--show-config", action="store_true", help="Print .orchestrater/config.json.")
     parser.add_argument("--validate-config", action="store_true", help="Validate .orchestrater/config.json.")
+    parser.add_argument("--diagnose-config", action="store_true", help="Print config blockers and warnings for dispatch preflight.")
     parser.add_argument("--print-template", action="store_true", help="Print the default config template.")
     return parser.parse_args(argv)
 
@@ -371,10 +528,22 @@ def main(argv: list[str]) -> int:
         if config is None:
             raise HelperError(f"{config_path(root)} does not exist.")
         validate_config(config)
+        warnings = config_warnings(config)
         print(f"Config is valid: {config_path(root)}")
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
         return 0
 
-    summary = inspect_environment()
+    if args.diagnose_config:
+        diagnosis = diagnose_config(root)
+        if args.json:
+            json.dump(diagnosis, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print_diagnosis_text(diagnosis)
+        return 0 if diagnosis["ok"] else 1
+
+    summary = inspect_environment(raw_orca=args.raw_orca)
     if args.json:
         json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
