@@ -1,166 +1,138 @@
 # orchestrater
 
-`orchestrater` 是一个用于编排 Orca 当前工作树中多个 agent 终端会话的通用 skill。
+`orchestrater` 是一个搭配 Orca 使用的通用多智能体协作 skill。用户通过 `/orchestrater` 在当前智能体中发起协作, 当前智能体默认作为 coordinator, 再用 Orca 原生 `orca orchestration` 去创建任务、派发 worker、等待结果和处理阻塞。
 
-它会把 agent 配置和任务状态持久化在项目内, 让后续对话可以复用同一批 agent 会话, 查看已派发任务, 记录决策, 并关闭任务。
+这个项目不是脚本驱动的命令行项目, 也不是某个智能体产品的专属扩展。Python 文件只保留为 skill 内部的环境检查 helper。
 
-## 功能
+## 核心模型
 
-- 在当前 Orca worktree 中启动并复用多个 agent CLI。
-- 默认 agent 为 `codex`, `claude`, `agy`。
-- 第一次初始化时选择 coordinator, 后续所有编排任务先发给 coordinator。
-- 默认不创建新的 Orca worktree。
-- 支持自然语言任务派发和显式参数。
-- 在 `.orchestrater/` 下持久化 agent, session, task, decision 状态。
+- `/orchestrater` 是用户入口。
+- 当前执行 `/orchestrater` 的智能体默认是 coordinator。
+- coordinator 负责拆分目标、选择 worker、派发任务、等待结果、处理 ask/escalation/decision gate, 最后汇总给用户。
+- 协作状态以 Orca 原生任务、消息和 worker lifecycle 为准。
+- 默认在当前 Orca worktree 中协作, 不自动创建新 worktree。
+- 默认 worker 偏好只包含 `agy`; 需要其它 worker 时由用户指定或在首次协作时确认。
+- 多 worker 且有明确角色时按角色拆分, 没有角色时广播任务。
+
+## 用户用法
+
+在智能体对话中调用:
+
+```text
+/orchestrater 分析当前项目的多智能体协作流程, 找出还缺什么
+/orchestrater 让多个智能体分别评审这个设计, 最后给我汇总
+/orchestrater 使用 agy 调研 Orca orchestration 的最佳用法
+/orchestrater 把实现交给 agy, 当前会话负责监督和汇总
+```
+
+完整移交时也通过自然语言表达:
+
+```text
+/orchestrater handoff 给 agy 独立处理这个任务
+```
+
+这种场景是 full handoff, 不再使用监督式 worker lifecycle。
+
+## Orca 协作流程
+
+coordinator 执行 `/orchestrater` 后, 应使用 Orca 原生命令完成协作:
+
+```bash
+orca status --json
+orca worktree current --json
+orca terminal list --worktree active --json
+```
+
+创建任务:
+
+```bash
+orca orchestration task-create \
+  --task-title "<短标题>" \
+  --spec "<目标、上下文、约束、期望产物、验收条件>" \
+  --json
+```
+
+派发给 worker:
+
+```bash
+orca orchestration dispatch \
+  --task <task_id> \
+  --to <worker_handle> \
+  --inject \
+  --json
+```
+
+等待 worker 结果和阻塞事件:
+
+```bash
+orca orchestration check \
+  --wait \
+  --types worker_done,escalation,decision_gate,ask \
+  --timeout-ms 60000 \
+  --json
+```
+
+worker 需要提问时使用 Orca ask/reply; 需要用户决策时使用 decision gate。任务完成后, coordinator 汇总每个 worker 的结论、冲突、风险和后续动作。
+
+## Session 复用
+
+coordinator 不应该每次都新开 worker。标准顺序是:
+
+1. 用 `orca terminal list --worktree active --json` 查找当前 worktree 中可写的已有终端。
+2. 复用匹配的 worker terminal。
+3. 找不到时, 才用 `orca terminal create --worktree active` 在当前 worktree 懒启动。
+
+示例:
+
+```bash
+orca terminal create \
+  --worktree active \
+  --title "orchestrater:agy" \
+  --command "agy" \
+  --json
+```
+
+terminal handle 是运行时状态, 不应作为长期配置写死。需要时重新从 Orca 查询。
+
+## 监督式协作与完整移交
+
+监督式协作适用于:
+
+- 多智能体分工。
+- 并行评审。
+- coordinator 需要等待多个结果再汇总。
+- 需要处理 worker 的 ask、escalation 或 decision gate。
+
+完整移交适用于:
+
+- 用户明确要求把任务交给另一个智能体独立处理。
+- coordinator 不需要等待和汇总。
+- 需要另起 worktree 做隔离执行。
+
+完整移交时使用 Orca terminal/worktree handoff 能力, 不创建 supervised orchestration lifecycle。
 
 ## 项目文件
 
 | 路径 | 用途 |
 |------|------|
-| `SKILL.md` | skill 入口和执行说明。 |
-| `scripts/orchestrater.py` | 处理 registry, sessions, tasks, decisions 和 Orca terminal dispatch 的确定性脚本。 |
-| `agents/openai.yaml` | OpenAI 生态下的 UI 发现元数据, 不代表项目的运行时边界。 |
-| `.orchestrater/agents.json` | 首次使用时创建的 agent registry。 |
-| `.orchestrater/sessions.json` | 当前已知 Orca terminal session 状态。 |
-| `.orchestrater/tasks.jsonl` | append-only 任务生命周期事件。 |
-| `.orchestrater/decisions.jsonl` | append-only 决策, 阻塞, 用户确认和最终摘要。 |
+| `SKILL.md` | skill 的主执行说明, 定义 `/orchestrater` 如何使用 Orca 原生 orchestration。 |
+| `scripts/orchestrater.py` | 内部环境检查 helper, 只摘要 Orca 状态、当前 worktree 和 terminal 列表。 |
+| `agents/openai.yaml` | OpenAI 生态下的发现元数据, 不代表 skill 只服务某个产品。 |
+| `.gitignore` | 忽略本地工具目录和生成的治理文档。 |
 
-`.agents/` 是本地工具目录, 已被忽略, 不是项目源码。
+`.agents/` 是本地工具目录, 不是项目源码。
 
-## 基本用法
+## Helper 验证
 
-在项目根目录执行:
+用户不需要直接运行 Python helper。开发这个 skill 时可以用它检查环境:
 
 ```bash
-python3 scripts/orchestrater.py --init
-python3 scripts/orchestrater.py --init --coordinator codex
-python3 scripts/orchestrater.py --list
-python3 scripts/orchestrater.py "Review the current diff"
+python3 scripts/orchestrater.py --json
 ```
 
-首次使用会创建 `.orchestrater/agents.json`, 默认内容为:
-
-```text
-codex  -> codex
-claude -> claude
-agy    -> agy
-```
-
-初始化会选择并持久化 coordinator。初始化只写入配置, 不会立即启动 agent 终端。真正派发任务时才会懒启动 coordinator 终端。
-
-也可以后续更新 coordinator:
-
-```bash
-python3 scripts/orchestrater.py --set-coordinator claude
-```
-
-## 添加或更新 Agent
-
-```bash
-python3 scripts/orchestrater.py --add reviewer --command "claude" --role review
-python3 scripts/orchestrater.py --add researcher --command "agy" --role research
-```
-
-添加 agent 只更新 registry, 不会杀掉或替换已有终端。
-
-## 派发任务
-
-普通任务先发给 coordinator, 由 coordinator 制定分工:
-
-```bash
-python3 scripts/orchestrater.py "Analyze the architecture and suggest next steps"
-```
-
-发送给 coordinator 的 prompt 会包含 `taskId`, 用户目标, 可用 agent 列表和持久化状态路径。coordinator 需要输出分工计划, 而不是假设任务已经发给其他 agent。
-
-执行 coordinator 已确认的分工计划时, 使用 `--from-coordinator`:
-
-```bash
-python3 scripts/orchestrater.py \
-  --from-coordinator \
-  --agent codex:implement \
-  "Implement the parser change"
-```
-
-把 coordinator 计划派发给多个 agent:
-
-```bash
-python3 scripts/orchestrater.py \
-  --from-coordinator \
-  --agent codex:implement,claude:review,agy:research \
-  "Improve the orchestration workflow"
-```
-
-只有 `--from-coordinator` 模式会直接派发给非 coordinator agent。指定角色时, 每个 agent 会收到角色化 prompt。未指定角色时, 同一个任务会广播给所有选中的 agent。
-
-## 结构化任务流程
-
-每次派发任务都会生成一个 `taskId`, 并按以下阶段推进:
-
-1. `intake`: 记录原始用户目标和选中的 agent。
-2. `assign`: 生成 agent 分工。
-3. `dispatch`: 先把编排任务发送到 coordinator terminal session。
-4. `collect`: 等待 agent 响应和后续输入。
-5. `synthesize`: 汇总输出并记录关键决策。
-6. `close`: 标记任务完成。
-
-查看持久化状态:
-
-```bash
-python3 scripts/orchestrater.py --status
-```
-
-记录决策或用户确认:
-
-```bash
-python3 scripts/orchestrater.py \
-  --task-id task-20260706070000-1234abcd \
-  --record-decision "使用 handle -> title -> lazy create 作为 session 复用顺序"
-```
-
-关闭任务:
-
-```bash
-python3 scripts/orchestrater.py \
-  --task-id task-20260706070000-1234abcd \
-  --close \
-  --summary "工作流已实现并验证"
-```
-
-## Session 复用
-
-每个 agent 的派发顺序:
-
-1. 如果缓存的 `terminalHandle` 仍 live 且 writable, 直接复用。
-2. 按配置的 terminal title 查找 live 终端, 例如 `orchestrater:codex`。
-3. 仍未找到时, 在当前 worktree 中懒创建新终端。
-
-脚本使用的 Orca CLI 命令:
-
-```bash
-orca status --json
-orca terminal list --worktree active --json
-orca terminal create --worktree active --title "orchestrater:<name>" --command "<cmd>" --json
-orca terminal send --terminal <handle> --text "<prompt>" --enter --json
-```
-
-## 验证
+项目验证:
 
 ```bash
 python3 -m py_compile scripts/orchestrater.py
 python3 /Users/sivan/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 ```
-
-非侵入式测试使用 `--dry-run`; 它不会调用 Orca, 也不会写入 terminal handle:
-
-```bash
-python3 scripts/orchestrater.py --agent codex --dry-run "Check the current design"
-```
-
-## 当前限制
-
-- 默认只使用当前 Orca worktree。
-- 第一版不支持自动创建新 worktree。
-- 第一版不接入完整 Orca `orchestration task-create/dispatch`。
-- 脚本不会自动解析 coordinator 输出并二次派发; coordinator 计划需要由用户或 operator 显式用 `--from-coordinator` 执行。
-- 脚本不会自动读取每个 agent 终端并自行汇总结果; coordinator 需要在审阅输出后记录决策并关闭任务。

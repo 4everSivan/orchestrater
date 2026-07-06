@@ -1,4 +1,4 @@
 interface:
   display_name: "Orchestrater"
-  short_description: "编排 Orca agent 终端会话"
-  default_prompt: "使用 $orchestrater 将这个任务交给当前 worktree 的 coordinator 规划并编排。"
+  short_description: "使用 Orca 原生 orchestration 协调多个智能体"
+  default_prompt: "使用 /orchestrater 由当前会话作为 coordinator, 基于 Orca 原生 orchestration 协调多个智能体完成这个任务。"
