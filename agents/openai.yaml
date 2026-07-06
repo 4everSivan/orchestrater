@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrater"
+  short_description: "Coordinate Orca agent terminal sessions"
+  default_prompt: "Use $orchestrater to dispatch this task to the configured Orca agents in the current worktree."
