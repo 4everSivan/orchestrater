@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "coordinator": {
+    "mode": "current-session"
+  },
+  "defaults": {
+    "worktree": "active",
+    "strategy": "plan-first",
+    "autoCreateTerminals": true,
+    "onMissingRole": "broadcast",
+    "maxConcurrentWorkers": 2
+  },
+  "permissions": {
+    "writeModel": "single-writer",
+    "allowParallelWrites": false,
+    "defaultWriteRole": "implementation"
+  },
+  "roles": [
+    {
+      "name": "research",
+      "agent": "agy",
+      "command": "agy",
+      "terminalTitle": "orchestrater:research",
+      "session": "dedicated",
+      "writeAccess": false,
+      "responsibilities": [
+        "research",
+        "compare options",
+        "summarize findings"
+      ]
+    }
+  ]
+}
