@@ -1,6 +1,6 @@
 # orchestrater
 
-`orchestrater` 是一个用于编排 Orca 当前工作树中多个 agent 终端会话的 Codex skill。
+`orchestrater` 是一个用于编排 Orca 当前工作树中多个 agent 终端会话的通用 skill。
 
 它会把 agent 配置和任务状态持久化在项目内, 让后续对话可以复用同一批 agent 会话, 查看已派发任务, 记录决策, 并关闭任务。
 
@@ -8,7 +8,7 @@
 
 - 在当前 Orca worktree 中启动并复用多个 agent CLI。
 - 默认 agent 为 `codex`, `claude`, `agy`。
-- 默认不包含 `gemini`。
+- 第一次初始化时选择 coordinator, 后续所有编排任务先发给 coordinator。
 - 默认不创建新的 Orca worktree。
 - 支持自然语言任务派发和显式参数。
 - 在 `.orchestrater/` 下持久化 agent, session, task, decision 状态。
@@ -19,7 +19,7 @@
 |------|------|
 | `SKILL.md` | skill 入口和执行说明。 |
 | `scripts/orchestrater.py` | 处理 registry, sessions, tasks, decisions 和 Orca terminal dispatch 的确定性脚本。 |
-| `agents/openai.yaml` | Codex skill 发现用 UI 元数据。 |
+| `agents/openai.yaml` | OpenAI 生态下的 UI 发现元数据, 不代表项目的运行时边界。 |
 | `.orchestrater/agents.json` | 首次使用时创建的 agent registry。 |
 | `.orchestrater/sessions.json` | 当前已知 Orca terminal session 状态。 |
 | `.orchestrater/tasks.jsonl` | append-only 任务生命周期事件。 |
@@ -33,6 +33,7 @@
 
 ```bash
 python3 scripts/orchestrater.py --init
+python3 scripts/orchestrater.py --init --coordinator codex
 python3 scripts/orchestrater.py --list
 python3 scripts/orchestrater.py "Review the current diff"
 ```
@@ -45,7 +46,13 @@ claude -> claude
 agy    -> agy
 ```
 
-初始化只写入配置, 不会立即启动 agent 终端。真正派发任务时才会懒启动终端。
+初始化会选择并持久化 coordinator。初始化只写入配置, 不会立即启动 agent 终端。真正派发任务时才会懒启动 coordinator 终端。
+
+也可以后续更新 coordinator:
+
+```bash
+python3 scripts/orchestrater.py --set-coordinator claude
+```
 
 ## 添加或更新 Agent
 
@@ -58,27 +65,33 @@ python3 scripts/orchestrater.py --add researcher --command "agy" --role research
 
 ## 派发任务
 
-派发给所有已启用 agent:
+普通任务先发给 coordinator, 由 coordinator 制定分工:
 
 ```bash
 python3 scripts/orchestrater.py "Analyze the architecture and suggest next steps"
 ```
 
-派发给单个 agent:
+发送给 coordinator 的 prompt 会包含 `taskId`, 用户目标, 可用 agent 列表和持久化状态路径。coordinator 需要输出分工计划, 而不是假设任务已经发给其他 agent。
 
-```bash
-python3 scripts/orchestrater.py --agent codex "Implement the parser change"
-```
-
-带角色派发给多个 agent:
+执行 coordinator 已确认的分工计划时, 使用 `--from-coordinator`:
 
 ```bash
 python3 scripts/orchestrater.py \
+  --from-coordinator \
+  --agent codex:implement \
+  "Implement the parser change"
+```
+
+把 coordinator 计划派发给多个 agent:
+
+```bash
+python3 scripts/orchestrater.py \
+  --from-coordinator \
   --agent codex:implement,claude:review,agy:research \
   "Improve the orchestration workflow"
 ```
 
-如果指定角色, 每个 agent 会收到角色化 prompt。未指定角色时, 同一个任务会广播给所有选中的 agent。
+只有 `--from-coordinator` 模式会直接派发给非 coordinator agent。指定角色时, 每个 agent 会收到角色化 prompt。未指定角色时, 同一个任务会广播给所有选中的 agent。
 
 ## 结构化任务流程
 
@@ -86,7 +99,7 @@ python3 scripts/orchestrater.py \
 
 1. `intake`: 记录原始用户目标和选中的 agent。
 2. `assign`: 生成 agent 分工。
-3. `dispatch`: 把 prompt 发送到 Orca terminal session。
+3. `dispatch`: 先把编排任务发送到 coordinator terminal session。
 4. `collect`: 等待 agent 响应和后续输入。
 5. `synthesize`: 汇总输出并记录关键决策。
 6. `close`: 标记任务完成。
@@ -149,4 +162,5 @@ python3 scripts/orchestrater.py --agent codex --dry-run "Check the current desig
 - 默认只使用当前 Orca worktree。
 - 第一版不支持自动创建新 worktree。
 - 第一版不接入完整 Orca `orchestration task-create/dispatch`。
+- 脚本不会自动解析 coordinator 输出并二次派发; coordinator 计划需要由用户或 operator 显式用 `--from-coordinator` 执行。
 - 脚本不会自动读取每个 agent 终端并自行汇总结果; coordinator 需要在审阅输出后记录决策并关闭任务。

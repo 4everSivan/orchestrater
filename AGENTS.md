@@ -70,7 +70,7 @@
 | `CODEX.md` | Codex 工具入口. |
 | `SKILL.md` | orchestrater skill 入口和 agent 操作流程. |
 | `scripts/orchestrater.py` | Orca terminal registry, list, add, dispatch 的确定性脚本. |
-| `agents/openai.yaml` | Codex/OpenAI UI skill 元数据. |
+| `agents/openai.yaml` | OpenAI/Codex 生态下的 UI skill 元数据; 不代表项目只服务 Codex. |
 | `.orchestrater/agents.json` | 项目级 agent registry, 首次运行时生成, 可提交. |
 | `.orchestrater/sessions.json` | 当前 worktree 中 agent terminal 状态快照. |
 | `.orchestrater/tasks.jsonl` | append-only 任务生命周期事件. |
@@ -116,7 +116,7 @@
 ## 8. 代码结构
 
 - 语言: Markdown / skill instruction format
-- 框架: Orca / Codex skill conventions
+- 框架: Orca / 通用 agent skill conventions
 - 构建系统: 未检测到
 - 入口文件: `SKILL.md`
 - 架构模式: 单 skill 包 + 确定性脚本 (confidence: MEDIUM)
@@ -128,7 +128,9 @@
 - 示例流程应可复现, 不依赖 `.agents/` 中的临时文件作为项目代码.
 - 所有路径示例应以仓库根目录为基准, 并标注是否为未来计划文件.
 - 默认在当前 Orca worktree 中启动多个 agent terminal, 不创建新 worktree.
-- 默认 agent 为 `codex`, `claude`, `agy`; 不默认包含 `gemini`.
+- 默认 agent 为 `codex`, `claude`, `agy`.
+- 第一次 `/orchestrater` / `--init` 必须选择 coordinator; 普通编排任务先发给 coordinator.
+- 只有 coordinator 已规划并经确认后, 才用 `--from-coordinator` 派发给其他 agent.
 - agent session 复用顺序: cached terminal handle -> terminal title -> lazy create.
 - 一次编排任务的结构化阶段: intake -> assign -> dispatch -> collect -> synthesize -> close.
 - 持久化状态分为 agents, sessions, tasks, decisions 四类.

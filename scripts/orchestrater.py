@@ -74,9 +74,14 @@ def default_config() -> dict[str, Any]:
     return {
         "version": 1,
         "worktreeMode": "active",
+        "coordinator": {
+            "agent": None,
+            "selectedAt": None,
+            "selectionSource": None,
+        },
         "defaults": {
             "agents": [item["name"] for item in DEFAULT_AGENTS],
-            "dispatch": "role-aware-or-broadcast",
+            "dispatch": "coordinator-first",
         },
         "agents": agents,
     }
@@ -144,6 +149,58 @@ def read_jsonl(root: Path, filename: str) -> list[dict[str, Any]]:
 
 def agent_map(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {agent["name"]: agent for agent in cfg.get("agents", [])}
+
+
+def coordinator_name(cfg: dict[str, Any]) -> str | None:
+    coordinator = cfg.get("coordinator")
+    if isinstance(coordinator, dict):
+        value = coordinator.get("agent")
+        return value if isinstance(value, str) and value else None
+    return None
+
+
+def set_coordinator(cfg: dict[str, Any], name: str, source: str) -> None:
+    agents = agent_map(cfg)
+    if name not in agents:
+        raise OrchestraterError(f"Coordinator agent {name!r} is not configured.")
+    cfg["coordinator"] = {
+        "agent": name,
+        "selectedAt": utc_now(),
+        "selectionSource": source,
+    }
+
+
+def ensure_coordinator(cfg: dict[str, Any], requested: str | None, interactive: bool) -> str:
+    if requested:
+        set_coordinator(cfg, requested, "argument")
+        return requested
+
+    existing = coordinator_name(cfg)
+    if existing:
+        return existing
+
+    agents = [agent["name"] for agent in cfg.get("agents", []) if agent.get("enabled", True)]
+    if not agents:
+        raise OrchestraterError("No enabled agents are available for coordinator selection.")
+
+    if interactive:
+        print("Select coordinator agent:")
+        for idx, name in enumerate(agents, start=1):
+            print(f"{idx}. {name}")
+        raw = input(f"Coordinator [1-{len(agents)}] (default 1): ").strip()
+        if raw:
+            try:
+                selected = agents[int(raw) - 1]
+            except (ValueError, IndexError) as exc:
+                raise OrchestraterError("Invalid coordinator selection.") from exc
+        else:
+            selected = agents[0]
+        set_coordinator(cfg, selected, "interactive")
+        return selected
+
+    selected = agents[0]
+    set_coordinator(cfg, selected, "default-noninteractive")
+    return selected
 
 
 def run_orca(args: list[str], dry_run: bool) -> CommandResult:
@@ -305,6 +362,37 @@ def build_prompt(agent: dict[str, Any], task: str, override_role: str | None, mu
     return "\n".join(lines)
 
 
+def build_coordinator_prompt(cfg: dict[str, Any], task: str, current_task_id: str) -> str:
+    available = [
+        {
+            "name": agent.get("name"),
+            "role": agent.get("role"),
+            "enabled": agent.get("enabled", True),
+        }
+        for agent in cfg.get("agents", [])
+    ]
+    return "\n".join(
+        [
+            f"Task ID: {current_task_id}",
+            "You are the coordinator for this Orca worktree.",
+            "Your job is to plan and coordinate the configured agents. Do not assume the task has already been sent to other agents.",
+            "User Goal:",
+            task,
+            "Available Agents:",
+            json.dumps(available, ensure_ascii=False),
+            "Persistent State:",
+            "- .orchestrater/agents.json stores agent registry and coordinator selection.",
+            "- .orchestrater/sessions.json stores live/stale terminal session state.",
+            "- .orchestrater/tasks.jsonl stores task lifecycle events.",
+            "- .orchestrater/decisions.jsonl stores decisions, blockers, confirmations, and summaries.",
+            "Expected Output:",
+            "Return a concise coordination plan: selected agents, role for each agent, prompt to send to each agent, expected outputs, and stopping/confirmation points.",
+            "Coordination Rule:",
+            "All orchestration starts from you. Ask the user or operator to execute a dispatch plan explicitly; do not claim other agents have been contacted until dispatch is performed.",
+        ]
+    )
+
+
 def add_agent(cfg: dict[str, Any], name: str, command: str, role: str | None) -> None:
     name = name.strip()
     if not name:
@@ -335,6 +423,7 @@ def add_agent(cfg: dict[str, Any], name: str, command: str, role: str | None) ->
 
 def print_agent_list(cfg: dict[str, Any], terminals: list[dict[str, Any]] | None) -> None:
     terms = terminals or []
+    print(f"Coordinator: {coordinator_name(cfg) or 'not selected'}")
     print("Configured agents:")
     for agent in cfg.get("agents", []):
         term, source = find_terminal(agent, terms)
@@ -432,7 +521,14 @@ def print_status(root: Path, limit: int) -> None:
         print("- none")
 
 
-def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | None]], task: str, dry_run: bool) -> int:
+def dispatch(
+    root: Path,
+    cfg: dict[str, Any],
+    selected: list[tuple[str, str | None]],
+    task: str,
+    dry_run: bool,
+    coordinator_first: bool,
+) -> int:
     ensure_orca_ready(dry_run)
     terminals = list_terminals(dry_run)
     agents = agent_map(cfg)
@@ -445,6 +541,7 @@ def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | No
         )
 
     current_task_id = task_id()
+    current_coordinator = coordinator_name(cfg)
     append_task_event(
         root,
         current_task_id,
@@ -452,6 +549,8 @@ def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | No
         {
             "goal": task,
             "agents": [{"name": name, "role": role} for name, role in selected],
+            "coordinator": current_coordinator,
+            "mode": "coordinator-first" if coordinator_first else "from-coordinator",
             "status": "open",
         },
         dry_run,
@@ -470,7 +569,10 @@ def dispatch(root: Path, cfg: dict[str, Any], selected: list[tuple[str, str | No
             handle = term.get("handle")
             if not handle:
                 raise OrchestraterError(f"No terminal handle available for {name}.")
-            prompt = build_prompt(agent, task, role, multi=multi, current_task_id=current_task_id)
+            if coordinator_first:
+                prompt = build_coordinator_prompt(cfg, task, current_task_id)
+            else:
+                prompt = build_prompt(agent, task, role, multi=multi, current_task_id=current_task_id)
             send_task(handle, prompt, dry_run=dry_run)
             if not dry_run:
                 agent["terminalHandle"] = handle
@@ -517,6 +619,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("task", nargs="*", help="Task text to dispatch.")
     parser.add_argument("--root", default=".", help="Project root containing .orchestrater/agents.json.")
     parser.add_argument("--init", action="store_true", help="Initialize default registry and exit.")
+    parser.add_argument("--coordinator", help="Select or update the coordinator agent.")
+    parser.add_argument("--set-coordinator", metavar="NAME", help="Set coordinator and exit.")
     parser.add_argument("--list", action="store_true", help="List configured agents and live terminal status.")
     parser.add_argument("--status", action="store_true", help="Show persisted sessions, recent task events, and decisions.")
     parser.add_argument("--limit", type=int, default=10, help="Number of recent events to show with --status.")
@@ -524,6 +628,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--command", help="Command for --add.")
     parser.add_argument("--role", help="Role for --add or selected agent override.")
     parser.add_argument("--agent", help="Agent selector, e.g. codex or codex:implement,claude:review.")
+    parser.add_argument("--from-coordinator", action="store_true", help="Dispatch a coordinator-approved plan to selected agents.")
     parser.add_argument("--task-id", help="Existing task id for --record-decision or --close.")
     parser.add_argument("--record-decision", metavar="TEXT", help="Append a decision, blocker, or user confirmation.")
     parser.add_argument("--decision-kind", default="decision", help="Decision kind for --record-decision.")
@@ -538,9 +643,17 @@ def main(argv: list[str]) -> int:
     root = Path(args.root).resolve()
     cfg = load_config(root, create=True)
 
+    if args.set_coordinator:
+        set_coordinator(cfg, args.set_coordinator, "argument")
+        save_config(root, cfg)
+        print(f"Coordinator set to {args.set_coordinator}")
+        return 0
+
     if args.init and not args.add and not args.list and not args.task:
+        coordinator = ensure_coordinator(cfg, args.coordinator, interactive=sys.stdin.isatty())
         save_config(root, cfg)
         print(f"Initialized {config_path(root)}")
+        print(f"Coordinator: {coordinator}")
         return 0
 
     if args.add:
@@ -596,14 +709,25 @@ def main(argv: list[str]) -> int:
 
     task = " ".join(args.task).strip()
     if not task:
+        coordinator = ensure_coordinator(cfg, args.coordinator, interactive=sys.stdin.isatty())
+        save_config(root, cfg)
         print(f"Initialized {config_path(root)}")
+        print(f"Coordinator: {coordinator}")
         print("No task provided. Use --list, --add, or pass task text to dispatch.")
         return 0
 
-    selected = parse_agent_spec(args.agent, cfg)
+    if args.from_coordinator:
+        selected = parse_agent_spec(args.agent, cfg)
+        coordinator_first = False
+    else:
+        coordinator = ensure_coordinator(cfg, args.coordinator, interactive=sys.stdin.isatty())
+        selected = [(coordinator, "coordinator")]
+        coordinator_first = True
     if args.role and len(selected) == 1:
         selected = [(selected[0][0], args.role)]
-    return dispatch(root, cfg, selected, task, args.dry_run)
+    if not args.dry_run:
+        save_config(root, cfg)
+    return dispatch(root, cfg, selected, task, args.dry_run, coordinator_first=coordinator_first)
 
 
 if __name__ == "__main__":
