@@ -1,0 +1,28 @@
+{
+  "name": "orchestrater-skill",
+  "version": "0.1.0",
+  "description": "Generic Orca multi-agent collaboration skill — a thin policy layer on top of Orca orchestration. Installs the skill into ~/.claude/skills/.",
+  "license": "MIT",
+  "author": "Howard.Shen",
+  "bin": {
+    "orchestrater-skill": "bin/install.mjs"
+  },
+  "files": [
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "agents",
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "orca",
+    "orchestration",
+    "multi-agent",
+    "claude",
+    "skill",
+    "coordinator"
+  ]
+}

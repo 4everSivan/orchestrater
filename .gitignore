@@ -3,3 +3,6 @@ docs/superpowers/
 AGENTS.md
 constitution.md
 CODEX.md
+RELEASE.md
+node_modules/
+*.tgz
