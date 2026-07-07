@@ -1,33 +1,33 @@
 ---
 name: orchestrater
-description: 通用 Orca 多智能体协作 skill,叠在 orchestration skill 之上的薄策略层。Use when the user invokes /orchestrater or $orchestrater, wants a coordinator-led supervised Orca orchestration workflow, needs multiple agents to collaborate in the current worktree, wants to reuse Orca terminals, create task DAGs, dispatch with --inject, wait for worker_done/escalation/decision_gate, or distinguish supervised orchestration from full handoff.
+description: Generic Orca multi-agent collaboration skill, a thin policy layer on top of the orchestration skill. Use when the user invokes /orchestrater or $orchestrater, wants a coordinator-led supervised Orca orchestration workflow, needs multiple agents to collaborate in the current worktree, wants to reuse Orca terminals, create task DAGs, dispatch with --inject, wait for worker_done/escalation/decision_gate, or distinguish supervised orchestration from full handoff.
 ---
 
 # Orchestrater
 
-薄策略层,叠在 `orchestration` skill 之上。**不重述 Orca 机制**——task/dispatch/check/gate/`--ready`/3 连熔断的用法见 orchestration skill,本 skill 只加策略增量。协作状态全在 Orca runtime,coordinator 无状态。coordinator = 当前会话,默认当前 worktree。不碰 `.agents/`。
+Thin policy layer on top of the `orchestration` skill. **Does not re-explain Orca mechanisms** — task/dispatch/check/gate/`--ready`/3-strike circuit-breaker usage lives in the orchestration skill; this skill only adds policy increments. All coordination state lives in Orca runtime; the coordinator is stateless. Coordinator = current session, defaults to current worktree. Do not touch `.agents/`.
 
-## 原语
+## Primitives
 
 ```
 PREFLIGHT = orca.status ∧ terminal.list(active) ∧ git.porcelain ⇒ {blockers,warnings}
-GATE(kind) = gate-create(自动 blocked);  gate-resolve → ready;  kind∈{blocker,plan,conflict};  dispatch 对 open gate/blocked 硬拒
-SERIAL    = 同worktree多写task用 --deps 串行;  父 completed 前下游 ¬ready
-VERIFY    = git diff --name-only vs allowed/forbiddenPaths + 记 --result{verificationCommand,exitCode,filesModified};  可疑才全量重跑
-RESUME    = task-list + gate-list + dispatch-show + terminal.read;  ¬重派 dispatched task
+GATE(kind) = gate-create(auto blocked);  gate-resolve → ready;  kind∈{blocker,plan,conflict};  dispatch hard-rejects open gate/blocked task
+SERIAL    = same-worktree multi-write tasks use --deps chain;  child ¬ready until parent completed
+VERIFY    = git diff --name-only vs allowed/forbiddenPaths + record --result{verificationCommand,exitCode,filesModified};  full re-run only on suspicion
+RESUME    = task-list + gate-list + dispatch-show + terminal.read;  ¬re-dispatch dispatched task
 ROUTE     = readonly ⇒ orchestration run --max-concurrent N ;  write ⇒ PREFLIGHT→GATE?→dispatch --inject→check --wait→VERIFY→completed
 ```
 
-**治理规则:压流程不压安全条件。** blocker 清单 / writeAccess / `¬重派 dispatched` 保持显式可读,用户可审计。
+**Governance rule: compress procedure, not safety conditions.** blocker list / writeAccess / `¬re-dispatch dispatched` stay explicit and human-auditable.
 
-## 路由 ROUTE
+## Routing ROUTE
 
-| 任务 | 路径 |
+| Task | Path |
 |---|---|
-| 只读扇出(research/review/compare) | `orchestration run --spec "<目标>" --max-concurrent <maxConcurrentWorkers>`;前置粗 PREFLIGHT: orca 可用 + 若懒启 terminal 则 cmd 须可信否则 `GATE(plan)` |
-| 写任务 | `task-create [--deps]` → PREFLIGHT → (blocker? `GATE`) → `dispatch --inject` → `check --wait` → VERIFY → `task-update --status completed --result` |
+| Read-only fan-out (research/review/compare) | `orchestration run --spec "<goal>" --max-concurrent <maxConcurrentWorkers>`; preceded by coarse PREFLIGHT: orca available + if lazy-creating a terminal, cmd must be trusted else `GATE(plan)` |
+| Write task | `task-create [--deps]` → PREFLIGHT → (blocker? `GATE`) → `dispatch --inject` → `check --wait` → VERIFY → `task-update --status completed --result` |
 
-`task-list --ready` 当外部记忆,不自己记状态。DAG 深度 ≤ 3-4。
+Use `task-list --ready` as external memory; do not track state in your head. DAG depth ≤ 3-4.
 
 ## PREFLIGHT → GATE
 
@@ -37,30 +37,30 @@ blockers: orca.down | config.{missing,invalid,bad-version} | role.unknown∧onMi
 warnings: terminal.missing | title.dup | worktree.dirty | readonly∧write-task | auto⇒direct-dispatch
 ```
 
-- 决策型 blocker(需用户拍板: cmd.untrusted、conflict、plan 确认)→ `GATE(kind)`;`gate-create` 自动 blocked,`gate-resolve` → ready。
-- 非决策型 blocker(等条件消除: orca.down、terminal.missing、bad-version)→ `task-update --status blocked`;条件消除后 `task-update --status ready`。
-- **dispatch 对 open gate / blocked task 硬拒**(实测: `"only ready tasks can be dispatched"`)。
-- **dispatch 不校验 `--to` handle**(实测: 假 handle 仍 `ok:true` 建空 dispatch → 静默挂起)。PREFLIGHT 必须先 `terminal list` 核实 handle 存在且 connected/writable,¬信缓存。
-- `plan-first`(默认): 出 plan + preflight,等用户 `gate-resolve`。`auto`: blocker 必停; warning 可继续但须汇报。
-- PREFLIGHT 只读,不创建 terminal/task/dispatch,不存 runtime 状态。
+- Decision blocker (needs user ruling: cmd.untrusted, conflict, plan confirm) → `GATE(kind)`; `gate-create` auto-blocks, `gate-resolve` → ready.
+- Non-decision blocker (waits for condition to clear: orca.down, terminal.missing, bad-version) → `task-update --status blocked`; restore `task-update --status ready` once cleared.
+- **dispatch hard-rejects open gate / blocked task** (verified: `"only ready tasks can be dispatched"`).
+- **dispatch does NOT validate `--to` handle** (verified: a fake handle still returns `ok:true` and creates an empty dispatch → silent hang). PREFLIGHT must verify the handle via `terminal list` (exists, connected, writable) first; ¬trust cache.
+- `plan-first` (default): emit plan + preflight, wait for user `gate-resolve`. `auto`: blocker must stop; warning may proceed but must report.
+- PREFLIGHT is read-only: creates no terminal/task/dispatch, stores no runtime state.
 
 ## VERIFY
 
-`worker_done ≠ completed`。收到 worker_done 后跑 VERIFY:`git diff --name-only` 对照 `allowedPaths`/`forbiddenPaths`;worker 声称的 `verificationCommand`+`exitCode` 记进 `task-update --result`;可疑才全量重跑。
+`worker_done ≠ completed`. On receiving worker_done, run VERIFY: `git diff --name-only` against `allowedPaths`/`forbiddenPaths`; record the worker's claimed `verificationCommand`+`exitCode` into `task-update --result`; full re-run only on suspicion.
 
-- 越权 / 文件交集冲突 / 验收不过 → `GATE(conflict)`,摆给用户。
-- 过 → `task-update --status completed --result`。下游 `--deps` 任务随之 `--ready`。
-- 验收不另建 DAG 节点:它就是 `completed` 转移门,解锁 SERIAL 链下一步。
+- Out-of-bounds / file-overlap conflict / verification failed → `GATE(conflict)`, surface to user.
+- Pass → `task-update --status completed --result`. Downstream `--deps` tasks become `--ready`.
+- Verification is not a separate DAG node: it is the `completed` transition gate that unblocks the SERIAL chain.
 
-## SERIAL(单写者)
+## SERIAL (single-writer)
 
-- 同 worktree 多写 task → `--deps` 串行。父 completed(过 VERIFY)前下游 ¬ready → 结构性挡并行写。
-- `maxConcurrentWorkers` 对写路径 = 1。`allowParallelWrites: true` + `GATE(plan)` 才可并行写。
-- 单写者不再靠口头约定,靠 `--deps` + `completed` 门。
+- Same-worktree multi-write tasks → `--deps` chain. Child ¬ready until parent completed (verified) → structurally blocks parallel writes.
+- `maxConcurrentWorkers` = 1 for the write path. `allowParallelWrites: true` + `GATE(plan)` required for parallel writes.
+- Single-writer is enforced by `--deps` + `completed` gate, not verbal convention.
 
-## 首次配置
+## First-use config
 
-`.orchestrater/config.json` 缺失 → 先问 6 题再写入,不执行用户任务:① coordinator 策略(默认 `current-session`)② 角色拓扑(默认 `research→agy`)③ 每角色独立 session? ④ 策略(`plan-first`/`auto`)⑤ 允许自动建 worker terminal? ⑥ 允许多 worker 并行写?(默认否,单写者)
+If `.orchestrater/config.json` is missing → ask 6 questions before writing it; do not execute the user task: ① coordinator mode (default `current-session`) ② role topology (default `research→agy`) ③ dedicated session per role? ④ strategy (`plan-first`/`auto`) ⑤ allow auto-creating worker terminals? ⑥ allow parallel writes? (default no, single-writer)
 
 ```
 schema v1:
@@ -72,28 +72,28 @@ schema v1:
            writeAccess:bool, responsibilities[], allowedPaths[], forbiddenPaths[] }
 ```
 
-`version` 是 config schema 版本,非 Orca runtime 版本。仅 `v1`;未知字段保留但 warning。**config schema 校验是软残留**(Orca 无原生配置层,coordinator 按 schema 自检)——但即便漏检,dispatch 仍被 GATE 硬挡。`version≠1`/缺字段 → blocker。
+`version` is the config schema version, not the Orca runtime version. `v1` only; unknown fields preserved but warned; `version≠1`/missing field → blocker. **Config schema validation is a soft residual** (Orca has no native config layer; coordinator self-checks against schema) — but even if mis-validated, dispatch is still hard-blocked by GATE.
 
-## 模式
+## Modes
 
-- **supervised**:多智能体分工/评审/汇总,`orca orchestration` + 本 skill 策略。
-- **handoff**:完整移交(handoff/handover/交给某智能体独立处理),`orca terminal send`/`worktree create`,**¬创建 lifecycle**,见 orca-cli skill。
-- **lightweight**:给已有终端一句话,直接 `terminal send`。
-- 歧义 → supervised;完整移交词 → handoff。
+- **supervised**: multi-agent divide/review/aggregate → `orca orchestration` + this skill's policy.
+- **handoff**: full transfer (handoff/handover/give to an agent to own) → `orca terminal send`/`worktree create`, **¬create lifecycle**; see orca-cli skill.
+- **lightweight**: one line to an existing terminal → `terminal send`.
+- Ambiguous → supervised; handoff keywords → handoff.
 
-## 失败
+## Failures
 
-| 情况 | 处置 |
+| Case | Handling |
 |---|---|
-| orca.down | 报 `orca status` 失败,请用户启动 Orca |
-| 无可用 worker | 列可见终端 + 缺失 cmd,请用户选/授权 |
-| cmd.untrusted | ¬自动建 terminal,先请用户确认 |
-| handle stale | `terminal list` 重取,¬信缓存 |
-| config missing | 走首次配置 |
-| config invalid / bad version | 报错,¬派发;bad version 提示 skill 不支持 |
-| wait timeout(10min) | 汇报一次,让用户选继续/结束/取消/重派 |
-| escalation | coordinator 能解则解,否则交用户 |
+| orca.down | report `orca status` failure, ask user to start Orca |
+| no worker | list visible terminals + missing cmd, ask user to choose/authorize |
+| cmd.untrusted | ¬auto-create terminal, ask user first |
+| handle stale | re-fetch via `terminal list`, ¬trust cache |
+| config missing | run first-use config |
+| config invalid / bad version | report error, ¬dispatch; bad version → skill unsupported |
+| wait timeout (10min) | report once, let user choose continue/end/cancel/redispatch |
+| escalation | resolve if coordinator can, else surface to user |
 | conflict | `GATE(conflict)` |
-| 崩溃/换会话 | `RESUME`(见 README):`task-list`+`gate-list`+`dispatch-show`+`terminal.read`;**¬重派 dispatched**;写任务 worker 死 → `GATE`,¬自动重试 |
+| crash / new session | `RESUME` (see README): `task-list`+`gate-list`+`dispatch-show`+`terminal.read`; **¬re-dispatch dispatched**; dead worker on write → `GATE`, ¬auto-retry |
 
-写任务 ¬自动重试;只读最多重试 1 次且说明原因。依赖 Orca 原生 3 连熔断 → `failed`。
+Write tasks ¬auto-retry; read-only retries at most once with a stated reason. Rely on Orca's native 3-strike circuit-breaker → `failed`.
