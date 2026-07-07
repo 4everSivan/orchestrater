@@ -1,8 +1,5 @@
 .agents/
-__pycache__/
-*.pyc
 docs/superpowers/
 AGENTS.md
 constitution.md
 CODEX.md
-
