@@ -13,16 +13,65 @@
 - 默认在当前 Orca worktree 中协作, 不自动创建新 worktree。
 - 多 worker 且有明确角色时按角色拆分, 没有角色时广播任务。
 
-## 安装
+## 安装环境与方式
+
+安装环境:
+
+- Node.js 18 或更高版本, 用于执行 `npx` 安装器。
+- Orca CLI 可用, 因为 `/orchestrater` 的实际协作依赖 Orca 原生 orchestration。
+- 目标智能体支持从 skill 目录加载 `SKILL.md`。
+
+`npx orchestrater-skill` 只负责把 skill 文件复制到目标 skill 目录。后续协作仍然在支持 skills 的智能体中通过 `/orchestrater` 触发, 不是运行一个 Node.js 或 Python 编排脚本。
+
+### 安装到全局 skill 目录
+
+适合希望在多个项目中复用 `/orchestrater` 的场景。默认目标目录是用户级 skill 目录:
 
 ```bash
 npx orchestrater-skill
 ```
 
-安装器把 skill 文件写入默认的兼容 skill 目录; 可用 `ORCHESTRATER_SKILL_DIR` 指定任意兼容 skill 目录:
+默认会写入:
+
+```text
+~/.claude/skills/orchestrater
+```
+
+如果你的智能体使用其他全局 skill 根目录, 显式指定完整目标目录:
 
 ```bash
-ORCHESTRATER_SKILL_DIR=/path/to/skills npx orchestrater-skill
+ORCHESTRATER_SKILL_DIR="$HOME/.agents/skills/orchestrater" npx orchestrater-skill
+```
+
+### 安装到项目内 skill 目录
+
+适合希望把 `/orchestrater` 作为当前项目专属能力维护的场景。目标目录应是当前项目约定的 skill 目录:
+
+```bash
+ORCHESTRATER_SKILL_DIR="$(pwd)/.agents/skills/orchestrater" npx orchestrater-skill
+```
+
+如果项目使用其他目录布局, 只需要把 `ORCHESTRATER_SKILL_DIR` 指向最终的 `orchestrater` skill 目录:
+
+```bash
+ORCHESTRATER_SKILL_DIR="$(pwd)/skills/orchestrater" npx orchestrater-skill
+```
+
+### 验证安装结果
+
+安装后目标目录应包含以下文件:
+
+```bash
+find "$ORCHESTRATER_SKILL_DIR" -maxdepth 2 -type f | sort
+```
+
+至少应看到:
+
+```text
+LICENSE
+README.md
+SKILL.md
+agents/openai.yaml
 ```
 
 `/orchestrater` 是通用 skill 入口, 在任何支持 skill 加载的 Orca 兼容智能体中都可调用, 不绑定特定产品。
