@@ -1,47 +1,54 @@
 # orchestrater
 
-`orchestrater` is a **thin policy layer** on top of the Orca `orchestration` skill. `/orchestrater` starts a collaboration; the current agent acts as coordinator and uses Orca's native orchestration for tasks/messages/worker lifecycle; this skill only adds policy increments: preflight gate, single-writer, writeAccess, role config, verification.
+`orchestrater` 是搭配 Orca 使用的多智能体协作 skill。用户通过 `/orchestrater` 发起协作, 当前智能体作为 coordinator, 基于 Orca 原生 orchestration 协调多个智能体完成任务: 拆分目标、派发 worker、等待结果、处理阻塞、汇总输出。
 
-The project keeps no scripts; all coordination state lives in Orca runtime; the coordinator is stateless.
+协作状态全部由 Orca 运行时管理, coordinator 不维护本地状态。
 
-> Skill internals are in English to save tokens. When the agent communicates with the user, it uses the user's language.
+## 核心模型
 
-## Design thesis
+- `/orchestrater` 是用户入口, 当前会话默认作为 coordinator。
+- coordinator 负责理解目标、选择 worker、派发任务、等待与处理 ask/escalation/decision gate, 最后汇总。
+- 任务、消息、worker 生命周期都由 Orca 原生 orchestration 管理。
+- 项目级协作偏好保存在 `.orchestrater/config.json`。
+- 默认在当前 Orca worktree 中协作, 不自动创建新 worktree。
+- 多 worker 且有明确角色时按角色拆分, 没有角色时广播任务。
 
-Every critical judgment the coordinator makes lands in Orca runtime state, so Orca's hard mechanisms (blocked/gate hard-reject, `--ready` readiness, `--deps` serialization, 3-strike circuit-breaker) enforce the consequences; the coordinator only detects and records evidence. **Detection may be soft (LLM); execution must be hard (Orca); evidence must be re-derivable.** The 6 mechanisms are all instances of `soft-detection → hard-execution → re-derivable-evidence`.
+## 安装
 
-Acknowledged soft residual: `.orchestrater/config.json` schema validation (Orca has no native config layer); but even if mis-validated, dispatch is still hard-blocked by GATE.
-
-## Primitives
-
-| Primitive | Definition |
-|---|---|
-| `PREFLIGHT` | `orca.status ∧ terminal.list(active) ∧ git.porcelain ⇒ {blockers,warnings}` |
-| `GATE(kind)` | `gate-create` (auto blocked); `gate-resolve` → ready; kind∈{blocker,plan,conflict}; dispatch hard-rejects open gate/blocked |
-| `SERIAL` | same-worktree multi-write tasks use `--deps` chain; child ¬ready until parent completed |
-| `VERIFY` | `git diff --name-only` vs allowed/forbiddenPaths + record `--result{verificationCommand,exitCode,filesModified}`; full re-run only on suspicion |
-| `RESUME` | `task-list`+`gate-list`+`dispatch-show`+`terminal.read`; ¬re-dispatch dispatched |
-| `ROUTE` | readonly ⇒ `orchestration run --max-concurrent N`; write ⇒ PREFLIGHT→GATE?→dispatch→check→VERIFY→completed |
-
-**Governance rule: compress procedure, not safety conditions.** blocker list / writeAccess / `¬re-dispatch dispatched` stay explicit and human-auditable.
-
-## Usage
-
-```text
-/orchestrater analyze the multi-agent collaboration flow in this project, find gaps
-/orchestrater have several agents review this design in parallel, then summarize
-/orchestrater use agy to research best practices for Orca orchestration
-/orchestrater hand implementation to agy, current session supervises and summarizes
-/orchestrater handoff to agy to own this task independently
+```bash
+npx orchestrater-skill
 ```
 
-The last one is a full handoff; no supervised lifecycle.
+这会把 skill 文件写入 `~/.claude/skills/orchestrater/`。随后在 Claude Code 中用 `/orchestrater <目标>` 调用。自定义安装路径:
 
-## First-use config
+```bash
+ORCHESTRATER_SKILL_DIR=/path/to/skills npx orchestrater-skill
+```
 
-When `.orchestrater/config.json` is missing, the coordinator asks 6 questions before writing: ① coordinator mode (default `current-session`) ② role topology (default `research→agy`) ③ dedicated session per role? ④ strategy (`plan-first`/`auto`) ⑤ allow auto-creating worker terminals? ⑥ allow parallel writes? (default no, single-writer)
+## 用法
 
-Example:
+```text
+/orchestrater 分析当前项目的多智能体协作流程, 找出还缺什么
+/orchestrater 让多个智能体分别评审这个设计, 最后给我汇总
+/orchestrater 使用 agy 调研 Orca orchestration 的最佳用法
+/orchestrater 把实现交给 agy, 当前会话负责监督和汇总
+/orchestrater handoff 给 agy 独立处理这个任务
+```
+
+最后一条是完整移交, 不再走监督式 lifecycle。
+
+## 首次配置
+
+`.orchestrater/config.json` 不存在时, coordinator 会先询问以下问题再写入配置, 不直接执行用户任务:
+
+1. coordinator 模式, 默认 `current-session`。
+2. 角色拓扑, 默认 `research → agy`。
+3. 每个角色是否独立 session。
+4. 默认协作策略, 推荐 `plan-first`, 用户明确授权时可设为 `auto`。
+5. 是否允许自动创建缺失的 worker terminal, 默认仅当前 worktree 允许。
+6. 当前 worktree 写权限模型, 默认单写者、多读者。
+
+配置示例:
 
 ```json
 {
@@ -75,54 +82,81 @@ Example:
 }
 ```
 
-`version` is the config schema version, not the Orca runtime version. `v1` only; unknown fields preserved but warned; `version≠1`/missing field → blocker. One agent command may play multiple roles, but each role defaults to a dedicated `terminalTitle` + dedicated session. Do not write Orca runtime handles into the config.
+`version` 是配置 schema 版本, 目前仅支持 `v1`。同一个 agent 命令可以承担多个角色, 但每个角色默认使用独立的 `terminalTitle` 和独立 session。Orca 运行时 handle 不写入配置。
 
-## Routing and write access
+## 协作流程
 
-Read-only fan-out goes through a coarse PREFLIGHT then `orchestration run --max-concurrent`; write tasks go through the manual loop `PREFLIGHT→GATE?→dispatch→check→VERIFY→completed`. Use `task-list --ready` as external memory; DAG depth ≤ 3-4.
+**只读任务**(调研、评审、对比)交给 Orca 自驱动:
 
-Single-writer is enforced by `--deps` chain + `completed` gate: until the parent passes VERIFY, the downstream write task is not `--ready`, so Orca structurally blocks parallel writes. `maxConcurrentWorkers` = 1 for the write path; `allowParallelWrites: true` + `GATE(plan)` required for parallel writes.
+```bash
+orca orchestration run --spec "<目标>" --max-concurrent <N> --json
+```
 
-## Verification
+**写任务**走监督式循环: 创建任务 → 派发前检查 → 派发 → 等待 → 验收 → 标记完成。
 
-`worker_done ≠ completed`. The coordinator runs `git diff --name-only` against `allowedPaths`/`forbiddenPaths`, records the worker's claimed `verificationCommand`+`exitCode` into `task-update --result`; full re-run only on suspicion. Out-of-bounds/file-overlap/verification-failed → `GATE(conflict)`; pass → `task-update --status completed --result`. Verification is not a separate DAG node; it is the `completed` transition gate.
+```bash
+orca orchestration task-create --spec "<目标、约束、验收条件>" [--deps '["<前置任务>"]'] --json
+orca orchestration dispatch --task <task_id> --to <worker> --inject --json
+orca orchestration check --wait --types worker_done,escalation,decision_gate,ask --timeout-ms 600000 --json
+```
 
-## Crash recovery RESUME
+派发前 coordinator 做只读检查: Orca 是否可用、配置是否有效、目标 worker terminal 是否存在、命令是否可信、是否违反写权限。检查不通过会阻断派发, 需要用户决策的问题以 decision gate 形式呈现。DAG 依赖深度建议不超过 3-4 层。
 
-The coordinator is stateless; all critical state is in Orca. A new session reconstructs with these commands; the cardinal rule is **never re-dispatch a `dispatched` task**:
+## 写权限模型
+
+默认单写者、多读者:
+
+- `implementation` 角色默认是唯一写者。
+- `research`、`review`、`test`、`docs` 默认只读或产出建议。
+- 同一 worktree 中的多个写任务通过 `--deps` 串行: 前置任务验收完成前, 后续写任务不会被派发, 从结构上避免并行写冲突。
+- 需要并行写时, 必须由用户明确授权, 或使用独立 worktree 隔离。
+
+派发给 worker 的任务说明应包含 `writeAccess`、`allowedPaths`、`forbiddenPaths` 和期望产物。写任务不自动重试; 只读任务最多重试一次且需说明原因。
+
+## 验收
+
+`worker_done` 只表示 worker 自称完成, 不等于结果可信。coordinator 收到后会:
+
+- 用 `git diff` 核对改动文件是否在 `allowedPaths`/`forbiddenPaths` 范围内。
+- 要求写者说明改动文件和验证命令/结果, 无法验证时必须明确说明。
+- 对 review 结果检查是否列出 findings 或明确无问题。
+- 发现越权、文件冲突或验收不通过时, 创建 decision gate 交由用户裁决。
+
+验收通过后才将任务标记为 `completed`, 并触发依赖它的后续任务。
+
+## 崩溃恢复
+
+coordinator 不维护本地状态, 所有关键状态都在 Orca 运行时。会话中断或切换后, 新会话通过 Orca 查询重建上下文:
 
 ```bash
 orca orchestration task-list --json
 orca orchestration gate-list --json
-# for each dispatched task:
 orca orchestration dispatch-show --task <id> --json
 orca terminal read --terminal <handle> --json
 ```
 
-| task status + worker state | recovery action |
-|---|---|
-| `blocked` + open gate | leave it; surface the gate to the user |
-| `dispatched` + worker alive (tui-idle / heartbeat) | keep `check --wait`, **¬re-dispatch** |
-| `dispatched` + worker dead / terminal gone | read-only → may re-dispatch; write → `GATE`, ¬auto-retry |
-| `ready` | PREFLIGHT first, then dispatch |
-| `completed` | already verified (evidence in `--result`), skip |
-| `failed` | Orca already 3-strike circuit-broke; surface to user |
+恢复时的核心原则是**不重新派发正在执行中的任务**。按状态处置: 阻塞的等待 gate、执行中的继续等待、已完成的跳过、失败的交由用户。写任务的 worker 失踪时不自动重试, 而是创建 decision gate。
 
-If the worker finished but never sent `worker_done` (stuck) → judge via `terminal read`; looks done but no `worker_done` → `GATE` to ask the user, ¬assume.
+## 监督式协作与完整移交
 
-## Supervised vs full handoff
+**监督式协作**适用于多智能体分工、并行评审、等待汇总、处理 ask/escalation/decision gate, 使用 `orca orchestration`。
 
-- Supervised: multi-agent divide / parallel review / wait-to-aggregate / handle ask/escalation/decision gate → `orca orchestration` + this skill's policy.
-- Full handoff: user explicitly gives the task to another agent to own independently, no wait/aggregate, or needs a separate worktree for isolation → `orca terminal send`/`worktree create`, ¬create lifecycle (see orca-cli skill).
-- Ambiguous defaults to supervised; handoff keywords default to handoff.
+**完整移交**适用于用户明确要求把任务交给另一个智能体独立处理、不需要等待汇总、或需要另起 worktree 隔离, 使用 `orca terminal send` 或 `orca worktree create`, 不创建监督式 lifecycle。
 
-## Project files
+意图不明确时默认按监督式处理; 出现 handoff/handover 等完整移交措辞时按移交处理。
 
-| Path | Purpose |
+## 项目文件
+
+| 路径 | 用途 |
 |------|------|
-| `SKILL.md` | compressed agent execution spec; 6 primitives + policy increments. |
-| `.orchestrater/config.json` | project-level role topology and default collaboration policy. |
-| `agents/openai.yaml` | OpenAI ecosystem discovery metadata; does not mean the skill serves only one product. |
-| `.gitignore` | ignores local tool dirs and generated governance docs. |
+| `SKILL.md` | skill 执行说明, 定义 `/orchestrater` 的协作策略。 |
+| `.orchestrater/config.json` | 项目级角色拓扑和默认协作策略。 |
+| `agents/openai.yaml` | OpenAI 生态下的发现元数据。 |
+| `package.json` | npm 包元数据, 用于通过 `npx` 分发安装。 |
+| `bin/install.mjs` | 安装器, 把 skill 文件写入 `~/.claude/skills/`。 |
 
-`.agents/` is a local tool directory, not project source.
+`.agents/` 是本地工具目录, 不是项目源码。
+
+## License
+
+MIT。
