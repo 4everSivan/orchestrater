@@ -11,25 +11,27 @@ Thin policy layer on top of the `orchestration` skill. **Does not re-explain Orc
 
 ```
 PREFLIGHT = orca.status ∧ terminal.list(active) ∧ git.porcelain ⇒ {blockers,warnings}
-GATE(kind) = gate-create(auto blocked);  gate-resolve → ready;  kind∈{blocker,plan,conflict};  dispatch hard-rejects open gate/blocked task
+GATE(kind) = gate-create(auto blocked);  gate-resolve → ready;  kind∈{blocker,plan,conflict};  only ready tasks dispatchable
 SERIAL    = same-worktree multi-write tasks use --deps chain;  child ¬ready until parent completed
 VERIFY    = git diff --name-only vs allowed/forbiddenPaths + record --result{verificationCommand,exitCode,filesModified};  full re-run only on suspicion
 RESUME    = task-list + gate-list + dispatch-show + terminal.read;  ¬re-dispatch dispatched task
-ROUTE     = readonly ⇒ orchestration run --max-concurrent N ;  write ⇒ PREFLIGHT→GATE?→dispatch --inject→check --wait→VERIFY→completed
+ROUTE     = readonly ⇒ PREFLIGHT→config→select terminal→task-create→dispatch --to <handle> --inject→check --wait→aggregate
+            write   ⇒ PREFLIGHT→GATE?→dispatch --to <handle> --inject→check --wait→VERIFY→completed
+            orchestration run = optional auto-run only (user-explicit | strategy:auto | ¬fixed-role/session-reuse)
 ```
 
-**Governance rule: compress procedure, not safety conditions.** blocker list / writeAccess / `¬re-dispatch dispatched` stay explicit and human-auditable.
+**Governance rule: compress procedure, not safety conditions.** blocker list / writeAccess / `¬re-dispatch dispatched` / handle verification stay explicit and human-auditable.
 
 ## Routing ROUTE
 
 | Task | Path |
 |---|---|
-| Read-only fan-out (research/review/compare) | `orchestration run --spec "<goal>" --max-concurrent <maxConcurrentWorkers>`; preceded by coarse PREFLIGHT: orca available + if lazy-creating a terminal, cmd must be trusted else `GATE(plan)` |
-| Write task | `task-create [--deps]` → PREFLIGHT → (blocker? `GATE`) → `dispatch --inject` → `check --wait` → VERIFY → `task-update --status completed --result` |
+| Read-only fan-out (research/review/compare) | Default: PREFLIGHT → read `.orchestrater/config.json` → select worker terminal by role `terminalTitle` → `task-create` → `dispatch --to <terminal_handle> --inject` → `check --wait` → aggregate. `orchestration run --max-concurrent <N> --spec "<goal>"` is an optional auto-run shortcut, only when the user explicitly asks for auto-run, or config `strategy:auto` allows it, and the task needs no fixed role or session reuse. |
+| Write task | `task-create [--deps]` → PREFLIGHT → (blocker? `GATE`) → `dispatch --to <terminal_handle> --inject` → `check --wait` → VERIFY → `task-update --status completed --result` |
 
 Use `task-list --ready` as external memory; do not track state in your head. DAG depth ≤ 3-4.
 
-## PREFLIGHT → GATE
+## PREFLIGHT → blockers → GATE
 
 ```
 blockers: orca.down | config.{missing,invalid,bad-version} | role.unknown∧onMissing≠broadcast
@@ -37,11 +39,20 @@ blockers: orca.down | config.{missing,invalid,bad-version} | role.unknown∧onMi
 warnings: terminal.missing | title.dup | worktree.dirty | readonly∧write-task | auto⇒direct-dispatch
 ```
 
-- Decision blocker (needs user ruling: cmd.untrusted, conflict, plan confirm) → `GATE(kind)`; `gate-create` auto-blocks, `gate-resolve` → ready.
-- Non-decision blocker (waits for condition to clear: orca.down, terminal.missing, bad-version) → `task-update --status blocked`; restore `task-update --status ready` once cleared.
-- **dispatch hard-rejects open gate / blocked task** (verified: `"only ready tasks can be dispatched"`).
-- **dispatch does NOT validate `--to` handle** (verified: a fake handle still returns `ok:true` and creates an empty dispatch → silent hang). PREFLIGHT must verify the handle via `terminal list` (exists, connected, writable) first; ¬trust cache.
-- `plan-first` (default): emit plan + preflight, wait for user `gate-resolve`. `auto`: blocker must stop; warning may proceed but must report.
+**Blocker phase:**
+
+- **pre-task blocker** (found in PREFLIGHT, before `task-create`): report to user, wait for ruling or condition to clear. Do NOT `gate-create` or `task-update` — no task exists yet. Covers every blocker in the list above.
+- **`orca.down`** is the strict case: issue NO `orca orchestration` write command (`task-create`/`dispatch`/`gate-create`/`task-update`/`run`); re-check with `orca status` only.
+- **post-task blocker** (found after `task-create`: stale handle, worker death, VERIFY conflict, escalation): decision type (needs user ruling) → `GATE(kind)`, `kind∈{blocker,plan,conflict}`; `gate-create` auto-blocks, `gate-resolve` → ready. Conditional type (waits for condition to clear) → `task-update --status blocked`, restore `--status ready` once cleared.
+
+**Dispatch safety** (verify before each dispatch, ¬trust cache):
+
+- Task is `ready` — non-ready tasks are not dispatchable. Verify via `task-list`/`task-show`.
+- `--to` is a **terminal handle** only — never a role name, agent name, or terminal title. Resolve from `orca terminal list --worktree active --json` by matching the role's `terminalTitle`; confirm `connected` + `writable`.
+- dispatch may accept an invalid `--to` or a non-ready task without a clear error. Do not rely on dispatch to self-validate; PREFLIGHT verifies first.
+- If a rule depends on a specific Orca version's behavior, verify it against the current Orca CLI before relying on it.
+
+- `plan-first` (default): emit plan + PREFLIGHT, wait for user confirmation before `task-create` (pre-task decision, ¬gate). `auto`: blocker must stop; warning may proceed but must report.
 - PREFLIGHT is read-only: creates no terminal/task/dispatch, stores no runtime state.
 
 ## VERIFY
@@ -54,7 +65,7 @@ warnings: terminal.missing | title.dup | worktree.dirty | readonly∧write-task 
 
 ## SERIAL (single-writer)
 
-- Same-worktree multi-write tasks → `--deps` chain. Child ¬ready until parent completed (verified) → structurally blocks parallel writes.
+- Same-worktree multi-write tasks → `--deps` chain. Child ¬ready until parent completed → structurally blocks parallel writes.
 - `maxConcurrentWorkers` = 1 for the write path. `allowParallelWrites: true` + `GATE(plan)` required for parallel writes.
 - Single-writer is enforced by `--deps` + `completed` gate, not verbal convention.
 
@@ -72,7 +83,7 @@ schema v1:
            writeAccess:bool, responsibilities[], allowedPaths[], forbiddenPaths[] }
 ```
 
-`version` is the config schema version, not the Orca runtime version. `v1` only; unknown fields preserved but warned; `version≠1`/missing field → blocker. **Config schema validation is a soft residual** (Orca has no native config layer; coordinator self-checks against schema) — but even if mis-validated, dispatch is still hard-blocked by GATE.
+`version` is the config schema version, not the Orca runtime version. `v1` only; unknown fields preserved but warned; `version≠1`/missing field → blocker. Config schema validation is a coordinator self-check (Orca has no native config layer); even if mis-validated, dispatch is still hard-blocked by the `ready`/handle/GATE checks above.
 
 ## Modes
 
@@ -85,14 +96,14 @@ schema v1:
 
 | Case | Handling |
 |---|---|
-| orca.down | report `orca status` failure, ask user to start Orca |
+| orca.down | pre-task blocker: report `orca status` failure, ask user to start Orca; ¬any orchestration write |
 | no worker | list visible terminals + missing cmd, ask user to choose/authorize |
-| cmd.untrusted | ¬auto-create terminal, ask user first |
-| handle stale | re-fetch via `terminal list`, ¬trust cache |
+| cmd.untrusted | pre-task blocker: ¬auto-create terminal, ask user first |
+| handle stale | post-task conditional: re-fetch via `terminal list`, ¬trust cache |
 | config missing | run first-use config |
-| config invalid / bad version | report error, ¬dispatch; bad version → skill unsupported |
+| config invalid / bad version | pre-task blocker: report error, ¬dispatch; bad version → skill unsupported |
 | wait timeout (10min) | report once, let user choose continue/end/cancel/redispatch |
-| escalation | resolve if coordinator can, else surface to user |
+| escalation | post-task decision: resolve if coordinator can, else `GATE`/surface to user |
 | conflict | `GATE(conflict)` |
 | crash / new session | `RESUME` (see README): `task-list`+`gate-list`+`dispatch-show`+`terminal.read`; **¬re-dispatch dispatched**; dead worker on write → `GATE`, ¬auto-retry |
 

@@ -19,11 +19,13 @@
 npx orchestrater-skill
 ```
 
-这会把 skill 文件写入 `~/.claude/skills/orchestrater/`。随后在 Claude Code 中用 `/orchestrater <目标>` 调用。自定义安装路径:
+安装器把 skill 文件写入默认的兼容 skill 目录; 可用 `ORCHESTRATER_SKILL_DIR` 指定任意兼容 skill 目录:
 
 ```bash
 ORCHESTRATER_SKILL_DIR=/path/to/skills npx orchestrater-skill
 ```
+
+`/orchestrater` 是通用 skill 入口, 在任何支持 skill 加载的 Orca 兼容智能体中都可调用, 不绑定特定产品。
 
 ## 用法
 
@@ -86,21 +88,28 @@ ORCHESTRATER_SKILL_DIR=/path/to/skills npx orchestrater-skill
 
 ## 协作流程
 
-**只读任务**(调研、评审、对比)交给 Orca 自驱动:
-
-```bash
-orca orchestration run --spec "<目标>" --max-concurrent <N> --json
-```
-
-**写任务**走监督式循环: 创建任务 → 派发前检查 → 派发 → 等待 → 验收 → 标记完成。
+**只读任务**(调研、评审、对比)和**写任务**默认都走监督式派发: coordinator 读取 `.orchestrater/config.json`, 按角色 `terminalTitle` 选择 worker terminal, 创建任务、派发、等待、汇总; 写任务额外做验收。
 
 ```bash
 orca orchestration task-create --spec "<目标、约束、验收条件>" [--deps '["<前置任务>"]'] --json
-orca orchestration dispatch --task <task_id> --to <worker> --inject --json
+orca orchestration dispatch --task <task_id> --to <terminal_handle> --inject --json
 orca orchestration check --wait --types worker_done,escalation,decision_gate,ask --timeout-ms 600000 --json
 ```
 
-派发前 coordinator 做只读检查: Orca 是否可用、配置是否有效、目标 worker terminal 是否存在、命令是否可信、是否违反写权限。检查不通过会阻断派发, 需要用户决策的问题以 decision gate 形式呈现。DAG 依赖深度建议不超过 3-4 层。
+`<terminal_handle>` 是 Orca terminal 的运行时 handle, 不是角色名、智能体名或 terminal title。获取和校验步骤:
+
+1. `orca terminal list --worktree active --json` 列出当前 worktree 的 terminal。
+2. 按目标角色的 `terminalTitle` 匹配到对应 terminal。
+3. 确认 terminal `connected` 且 `writable`。
+4. 把 handle 传给 `dispatch --to`; 每次派发前重新获取, 不缓存 handle。
+
+如果用户明确要求自动运行, 或配置 `strategy` 为 `auto`, 且任务不要求固定角色或 session 复用, 可以用 Orca 自驱动作为快捷路径:
+
+```bash
+orca orchestration run --max-concurrent <N> --spec "<目标>" --json
+```
+
+派发前 coordinator 做只读检查: Orca 是否可用、配置是否有效、terminal handle 是否存在且可用、命令是否可信、是否违反写权限。检查不通过会阻断派发, 需要用户决策的问题以 decision gate 呈现。阻塞分两类: 任务创建前发现的(如 Orca 不可用、配置缺失、命令不可信)直接向用户汇报, 不创建 gate; 任务创建后发现的(如 worker 失踪、验收冲突)才用 gate 或 `task-update --status blocked`。DAG 依赖深度建议不超过 3-4 层。
 
 ## 写权限模型
 
@@ -153,7 +162,7 @@ orca terminal read --terminal <handle> --json
 | `.orchestrater/config.json` | 项目级角色拓扑和默认协作策略。 |
 | `agents/openai.yaml` | OpenAI 生态下的发现元数据。 |
 | `package.json` | npm 包元数据, 用于通过 `npx` 分发安装。 |
-| `bin/install.mjs` | 安装器, 把 skill 文件写入 `~/.claude/skills/`。 |
+| `bin/install.mjs` | 安装器, 把 skill 文件写入兼容 skill 目录(可用 `ORCHESTRATER_SKILL_DIR` 覆盖)。 |
 
 `.agents/` 是本地工具目录, 不是项目源码。
 

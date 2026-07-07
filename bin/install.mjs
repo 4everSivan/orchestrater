@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // One-shot installer for the orchestrater skill. Run via `npx orchestrater-skill`.
-// Copies the skill files into ~/.claude/skills/orchestrater/.
+// Copies the skill files into a compatible skill directory; override the
+// destination with ORCHESTRATER_SKILL_DIR (defaults to ~/.claude/skills/orchestrater).
 //
 // This is a package-distribution tool, NOT a script the skill runs at runtime.
 // The skill itself stays script-free; orchestration is native Orca + the agent.
@@ -18,7 +19,7 @@ const DEST =
 
 // Files that make the skill functional. .orchestrater/config.json is NOT shipped:
 // it is created per project on first /orchestrater invocation (6-question onboarding).
-const FILES = ["SKILL.md", "README.md", "agents/openai.yaml"];
+const FILES = ["SKILL.md", "README.md", "LICENSE", "agents/openai.yaml"];
 
 async function exists(path) {
   try {
@@ -40,7 +41,7 @@ async function main() {
     await copyFile(src, join(DEST, file));
   }
   console.log(`orchestrater skill installed → ${DEST}`);
-  console.log("Invoke it in Claude Code with: /orchestrater <goal>");
+  console.log("Invoke it with: /orchestrater <goal>");
 }
 
 main().catch((err) => {
