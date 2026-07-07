@@ -1,16 +1,15 @@
-# Changelog
+# 更新日志
 
 ## [0.1.1] - 2026-07-07
 
-- Enforce strict preflight blocker classification and dispatch safety checks.
-- Package the skill for distribution with package.json and bin/install.mjs installer.
+- 强化预检阻断分类和任务分发安全检查。
+- 增加 npm 分发所需的 package.json 与 bin/install.mjs 安装器。
 
 ## [0.1.0] - 2026-07-07
 
-- Align `/orchestrater` with Orca native orchestration boundaries.
-- Keep Orca runtime state in Orca, while this skill owns project-level policy only.
-- Clarify supervised orchestration vs full handoff behavior.
-- Document terminal-handle dispatch, role/session reuse, single-writer policy, and verification flow.
-- Generalize package/install wording.
-- Include `LICENSE` in installed skill files.
-
+- 将 `/orchestrater` 对齐到 Orca 原生编排边界。
+- Orca 运行时状态保留在 Orca 中，本 skill 只维护项目级策略。
+- 明确受监督编排与完整交接的行为差异。
+- 补充终端句柄分发、角色与会话复用、单写入者策略和验证流程。
+- 泛化包安装与使用说明，避免绑定到特定智能体。
+- 安装 skill 时包含 `LICENSE` 文件。
