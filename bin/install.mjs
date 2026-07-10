@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { access, cp, mkdir, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { access, cp, lstat, mkdir, rm } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -11,29 +11,43 @@ const args = process.argv.slice(2);
 const hostIndex = args.indexOf("--host");
 const host = hostIndex >= 0 ? args[hostIndex + 1] : undefined;
 const force = args.includes("--force");
+const allowCustomDestination = args.includes("--allow-custom-destination");
 
 function usage(message) {
   if (message) console.error(message);
-  console.error("Usage: npx orchestrater-skill --host claude|codex [--force]");
+  console.error("Usage: npx orchestrater-skill --host claude|codex [--force] [--allow-custom-destination]");
   process.exit(2);
 }
 
 if (!HOSTS.has(host)) usage("--host is required and must be claude or codex");
 if (hostIndex >= 0 && args[hostIndex + 1]?.startsWith("--")) usage("--host needs a value");
 
-const destination = process.env.ORCHESTRATER_INSTALL_DIR ?? join(
+const standardDestination = join(
   homedir(),
   host === "claude" ? ".claude" : ".codex",
   "skills",
   SKILL_NAME,
 );
+const customDestination = process.env.ORCHESTRATER_SKILL_DIR;
+if (customDestination && !allowCustomDestination) usage("ORCHESTRATER_SKILL_DIR requires --allow-custom-destination");
+if (allowCustomDestination && !customDestination) usage("--allow-custom-destination requires ORCHESTRATER_SKILL_DIR");
+const destination = resolve(customDestination ?? standardDestination);
 const files = ["SKILL.md", "README.md", "LICENSE", "src", "agents"];
 
 async function exists(path) {
   try { await access(path); return true; } catch { return false; }
 }
 
+async function assertNotSymlink(path) {
+  try {
+    if ((await lstat(path)).isSymbolicLink()) usage(`Refusing symlink destination: ${path}`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
 async function main() {
+  await assertNotSymlink(destination);
   if (await exists(destination)) {
     if (!force) usage(`Destination exists: ${destination}. Re-run with --force to replace it.`);
     await rm(destination, { recursive: true, force: true });

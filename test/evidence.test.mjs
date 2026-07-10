@@ -44,3 +44,27 @@ test("returns verification failure with structured evidence", async () => {
   await writeFile(join(cwd, "src.js"), "changed\n");
   await assert.rejects(() => verifyEvidence({ client, taskId: "task_2", cwd }), (error) => error.code === "E_EVIDENCE_VERIFICATION_FAILED" && error.details.evidence.verification.exitCode === 9);
 });
+
+test("rejects files created by verification outside the approved scope", async () => {
+  const cwd = await repository();
+  let result;
+  const client = {
+    taskUpdate: async (_id, _status, next) => { result = next; },
+    taskList: async () => ({ tasks: [{ id: "task_3", result }] }),
+  };
+  await captureEvidence({ client, taskId: "task_3", cwd, scope: { allowedPaths: ["src.js"], verification: { command: "node", args: ["-e", "require('node:fs').writeFileSync('coverage.txt', 'generated')"] } } });
+  await writeFile(join(cwd, "src.js"), "changed\n");
+  await assert.rejects(() => verifyEvidence({ client, taskId: "task_3", cwd }), { code: "E_EVIDENCE_OUT_OF_SCOPE" });
+});
+
+test("rejects evidence whose approval no longer matches its captured scope", async () => {
+  const cwd = await repository();
+  let result;
+  const client = {
+    taskUpdate: async (_id, _status, next) => { result = next; },
+    taskList: async () => ({ tasks: [{ id: "task_4", result }] }),
+  };
+  await captureEvidence({ client, taskId: "task_4", cwd, scope: { allowedPaths: ["src.js"], verification: { command: "node", args: ["-e", "process.exit(0)"] } } });
+  result.evidence.writeScope.allowedPaths = ["README.md"];
+  await assert.rejects(() => verifyEvidence({ client, taskId: "task_4", cwd }), { code: "E_APPROVAL_INVALID" });
+});

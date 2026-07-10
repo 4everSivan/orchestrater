@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { access, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { inputError, policyError } from "./errors.mjs";
 
 export const HARD_FORBIDDEN_PATHS = Object.freeze([".git/**", ".orchestrater/**", ".agents/**"]);
@@ -22,10 +22,28 @@ export function defaultConfig() {
     roles: [
       { name: "implementation", agent: "codex", command: "codex", terminalTitle: "orchestrater:implementation", session: "dedicated", writeAccess: true, responsibilities: ["implement", "run targeted verification"] },
       { name: "review", agent: "claude", command: "claude", terminalTitle: "orchestrater:review", session: "dedicated", writeAccess: false, responsibilities: ["review", "report findings"] },
-      { name: "research", agent: "agy", command: "agy", terminalTitle: "orchestrater:research", session: "dedicated", writeAccess: false, responsibilities: ["research", "compare options", "summarize findings"] },
     ],
   };
 }
+
+function assertKnownKeys(value, allowed, location) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw inputError("E_INPUT_CONFIG_FIELD", `${location} must be an object`, `set ${location} to an object`);
+  }
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw inputError("E_INPUT_UNKNOWN_FIELD", `Unknown field ${location}.${key}`, "remove the field or migrate to a schema version that supports it");
+    }
+  }
+}
+
+const TOP_LEVEL_FIELDS = new Set(["version", "coordinator", "defaults", "permissions", "roles"]);
+const COORDINATOR_FIELDS = new Set(["mode"]);
+const DEFAULT_FIELDS = new Set(["worktree", "strategy", "autoCreateTerminals", "onMissingRole", "maxConcurrentReadWorkers"]);
+const PERMISSION_FIELDS = new Set(["writeModel", "allowParallelWrites", "defaultWriteRole"]);
+const ROLE_FIELDS = new Set(["name", "agent", "command", "terminalTitle", "session", "writeAccess", "responsibilities"]);
+const WRITE_SCOPE_FIELDS = new Set(["allowedPaths", "verification"]);
+const VERIFICATION_FIELDS = new Set(["command", "args"]);
 
 export async function readConfig(path) {
   try {
@@ -76,12 +94,16 @@ function requireString(value, field) {
 }
 
 export function validateConfig(config) {
+  assertKnownKeys(config, TOP_LEVEL_FIELDS, "config");
   if (config.version === 1) {
     return { valid: false, migration: migrateV1(config), warnings: ["config v1 requires explicit migration to v2"] };
   }
   if (config.version !== 2) {
     throw inputError("E_INPUT_CONFIG_VERSION", "config.version must be 2", "migrate the config before dispatching");
   }
+  assertKnownKeys(config.coordinator, COORDINATOR_FIELDS, "config.coordinator");
+  assertKnownKeys(config.defaults ?? {}, DEFAULT_FIELDS, "config.defaults");
+  assertKnownKeys(config.permissions ?? {}, PERMISSION_FIELDS, "config.permissions");
   if (config.coordinator?.mode !== "current-session") {
     throw inputError("E_INPUT_COORDINATOR", "coordinator.mode must be current-session", "set coordinator.mode to current-session");
   }
@@ -91,6 +113,7 @@ export function validateConfig(config) {
   const names = new Set();
   const titles = new Set();
   const roles = config.roles.map((role, index) => {
+    assertKnownKeys(role, ROLE_FIELDS, `config.roles[${index}]`);
     const name = requireString(role.name, `roles[${index}].name`);
     const terminalTitle = requireString(role.terminalTitle, `roles[${index}].terminalTitle`);
     if (names.has(name)) throw inputError("E_INPUT_ROLE_DUPLICATE", `duplicate role: ${name}`, "use unique role names");
@@ -131,6 +154,7 @@ export function validateConfig(config) {
 }
 
 export function validateWriteScope(scope) {
+  assertKnownKeys(scope, WRITE_SCOPE_FIELDS, "writeScope");
   if (!scope || typeof scope !== "object" || !Array.isArray(scope.allowedPaths) || scope.allowedPaths.length === 0) {
     throw inputError("E_INPUT_WRITE_SCOPE", "writeScope.allowedPaths must be non-empty", "provide repository-relative allowed paths");
   }
@@ -146,10 +170,14 @@ export function validateWriteScope(scope) {
   if (!scope.verification || typeof scope.verification !== "object") {
     throw inputError("E_INPUT_VERIFICATION", "writeScope.verification is required", "provide command and args");
   }
+  assertKnownKeys(scope.verification, VERIFICATION_FIELDS, "writeScope.verification");
   const command = requireString(scope.verification.command, "writeScope.verification.command");
   const args = scope.verification.args;
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) {
     throw inputError("E_INPUT_VERIFICATION_ARGS", "writeScope.verification.args must be an array of strings", "provide command arguments as JSON strings");
+  }
+  if (args.some((arg) => /(?:^--?(?:token|secret|password|api[-_]?key)(?:=|$)|\b(?:token|secret|password|api[-_]?key)\s*=)/i.test(arg))) {
+    throw inputError("E_INPUT_VERIFICATION_SECRET", "verification arguments must not contain credentials", "inject credentials through the runtime environment instead");
   }
   return { allowedPaths, verification: { command, args } };
 }
@@ -171,7 +199,21 @@ export function pathAllowed(path, allowedPaths) {
   return allowedPaths.some((pattern) => globMatches(path, pattern));
 }
 
-export async function writeConfig(path, config) {
+async function exists(path) {
+  try { await access(path); return true; } catch { return false; }
+}
+
+export function configBackupPath(path) {
+  return join(dirname(path), "config.v1.bak");
+}
+
+export async function writeConfig(path, config, { createOnly = false, backup = false } = {}) {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  if (createOnly && await exists(path)) {
+    throw policyError("E_POLICY_CONFIG_EXISTS", `Config already exists: ${path}`, "validate or migrate the existing config instead of overwriting it");
+  }
+  if (backup && await exists(path)) await copyFile(path, configBackupPath(path));
+  const temporaryPath = `${path}.tmp-${process.pid}`;
+  await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await rename(temporaryPath, path);
 }

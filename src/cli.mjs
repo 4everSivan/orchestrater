@@ -17,7 +17,7 @@ function parseArgs(argv) {
     const item = argv[index];
     if (!item.startsWith("--")) { positionals.push(item); continue; }
     const name = item.slice(2);
-    if (name === "confirm-command" || name === "write") { flags[name] = true; continue; }
+    if (name === "confirm-command" || name === "write" || name === "approved-plan") { flags[name] = true; continue; }
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) throw inputError("E_INPUT_FLAG", `Missing value for --${name}`, "provide a flag value");
     flags[name] = value;
@@ -46,6 +46,7 @@ async function preflight(flags) {
   if (!role) throw inputError("E_INPUT_ROLE", `Unknown role: ${flags.role}`, "select a configured role");
   const client = new OrcaClient();
   await client.status();
+  await client.capabilities();
   let writeScope;
   if (taskClass === "write") {
     writeScope = validateWriteScope(jsonFlag(flags["write-scope"], "write-scope"));
@@ -64,17 +65,27 @@ async function terminal(flags, action) {
   if (!role) throw inputError("E_INPUT_ROLE", `Unknown role: ${flags.role}`, "select a configured role");
   const client = new OrcaClient();
   await client.status();
+  await client.capabilities();
   if (action === "resolve") return { ok: true, terminal: resolveTerminal(role, await client.terminalList()) };
+  if (config.defaults.autoCreateTerminals !== true || flags["approved-plan"] !== true) {
+    throw policyError("E_POLICY_TERMINAL_CREATION", "Terminal creation requires an approved plan and autoCreateTerminals=true", "obtain user approval before creating a terminal");
+  }
   assertCreatable(role, flags["confirm-command"] === true);
   const created = await client.terminalCreate(role.terminalTitle, role.command);
   return { ok: true, terminal: { handle: created.handle ?? created.id, title: role.terminalTitle, created: true } };
 }
 
 async function evidence(flags, action) {
+  if (action === "capture" && flags["approved-plan"] !== true) {
+    throw policyError("E_POLICY_APPROVAL_REQUIRED", "Evidence capture requires an approved plan", "obtain user confirmation before recording a write scope");
+  }
   const client = new OrcaClient();
   await client.status();
+  await client.capabilities();
   if (!flags.task) throw inputError("E_INPUT_TASK", "--task is required", "provide the Orca task id");
-  if (action === "capture") return { ok: true, result: await captureEvidence({ client, taskId: flags.task, scope: jsonFlag(flags["write-scope"], "write-scope"), cwd: process.cwd() }) };
+  if (action === "capture") {
+    return { ok: true, result: await captureEvidence({ client, taskId: flags.task, scope: jsonFlag(flags["write-scope"], "write-scope"), cwd: process.cwd() }) };
+  }
   return { ok: true, result: await verifyEvidence({ client, taskId: flags.task, cwd: process.cwd() }) };
 }
 
@@ -82,7 +93,7 @@ async function config(flags, action) {
   if (action === "init") {
     const initial = defaultConfig();
     if (!flags.write) return { ok: true, config: initial, written: false };
-    await writeConfig(configPath(flags), initial);
+    await writeConfig(configPath(flags), initial, { createOnly: true });
     return { ok: true, config: initial, written: true };
   }
   const original = await readConfig(configPath(flags));
@@ -90,7 +101,7 @@ async function config(flags, action) {
   if (action === "validate") return { ok: true, ...result };
   if (original.version !== 1) throw inputError("E_INPUT_MIGRATION", "only config v1 can be migrated", "validate the existing v2 config instead");
   if (!flags.write) return { ok: true, migration: result.migration, written: false };
-  await writeConfig(configPath(flags), result.migration);
+  await writeConfig(configPath(flags), result.migration, { backup: true });
   return { ok: true, migration: result.migration, written: true };
 }
 

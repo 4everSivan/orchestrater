@@ -25,7 +25,7 @@ npx orchestrater-skill --host codex
 npx orchestrater-skill --host codex --force
 ```
 
-可用 `ORCHESTRATER_INSTALL_DIR` 指定完整目标目录。
+自定义目录必须同时提供 `ORCHESTRATER_SKILL_DIR` 和 `--allow-custom-destination`。安装器拒绝 symlink 与未授权目录；`--force` 只会替换标准或已显式授权的目标。
 
 ## 配置
 
@@ -58,7 +58,7 @@ node ~/.claude/skills/orchestrater/src/cli.mjs config validate
 node ~/.claude/skills/orchestrater/src/cli.mjs config migrate
 ```
 
-审阅迁移结果后，明确允许时才执行 `config migrate --write`。
+审阅迁移结果后，明确允许时才执行 `config migrate --write`。迁移会原子写入，并将旧配置保留为同目录 `config.v1.bak`。
 
 ## 写任务流程
 
@@ -71,7 +71,9 @@ node ~/.claude/skills/orchestrater/src/cli.mjs config migrate
 }
 ```
 
-coordinator 先展示该范围并取得确认，然后运行 `preflight`、创建 ready task、`evidence capture`、重新解析 terminal 后才 dispatch。收到 `worker_done` 后运行 `evidence verify`；越界文件、缺 baseline 或非零验证退出码必须创建 Orca conflict gate，不能 completed。
+coordinator 先展示该范围并取得确认，然后创建带 scope hash 的 Orca task、运行 `preflight` 和 `evidence capture`、重新解析 terminal 后才 dispatch。收到 `worker_done` 后运行 `evidence verify`；verification 前后任一越界文件、缺 baseline、hash 不匹配或非零验证退出码都必须创建 Orca conflict gate，不能 completed。
+
+preflight 还会执行 Orca capability probe；当前 CLI 缺少 task result、dispatch 或 terminal 所需选项时，返回 `E_RUNTIME_ORCA_INCOMPATIBLE`，不会创建 task。
 
 ## 开发与验证
 

@@ -29,16 +29,15 @@
       ]
     },
     {
-      "name": "research",
-      "agent": "agy",
-      "command": "agy",
-      "terminalTitle": "orchestrater:research",
+      "name": "review",
+      "agent": "claude",
+      "command": "claude",
+      "terminalTitle": "orchestrater:review",
       "session": "dedicated",
       "writeAccess": false,
       "responsibilities": [
-        "research",
-        "compare options",
-        "summarize findings"
+        "review",
+        "report findings"
       ]
     }
   ]

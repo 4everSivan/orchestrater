@@ -18,14 +18,14 @@ This skill is a policy layer over the local `orchestrater` Node CLI and Orca. Re
 
 1. Run `node <skill-root>/src/cli.mjs preflight --task-class read --role <role>`.
 2. Run `node <skill-root>/src/cli.mjs terminal resolve --role <role>`.
-3. If terminal is missing, obtain user confirmation; then run `node <skill-root>/src/cli.mjs terminal create --role <role> [--confirm-command]` only when required for an untrusted command.
+3. If terminal is missing, obtain user confirmation; then run `node <skill-root>/src/cli.mjs terminal create --role <role> --approved-plan [--confirm-command]`. Creation also requires `autoCreateTerminals=true`; untrusted commands require the extra confirmation.
 4. Create an Orca task, verify it is ready, dispatch to the resolved handle, wait for `worker_done`, `ask`, `escalation`, or `decision_gate`, then synthesize.
 
 ## Write task
 
 1. Present role, writeScope, and verification to the user. In `plan-first`, wait for confirmation.
 2. Run `node <skill-root>/src/cli.mjs preflight --task-class write --role <role> --write-scope '<json>'`.
-3. Create an Orca task. While it is ready, run `node <skill-root>/src/cli.mjs evidence capture --task <id> --write-scope '<json>'`.
+3. Create an Orca task with the normalized scope hash in its result/spec. While it is ready, run `node <skill-root>/src/cli.mjs evidence capture --task <id> --write-scope '<json>' --approved-plan`.
 4. Resolve the terminal again and dispatch only to its unique connected/writable handle.
 5. On `worker_done`, run `node <skill-root>/src/cli.mjs evidence verify --task <id>`.
 6. Only a successful result may be supplied to `orca orchestration task-update --status completed --result`. Any `E_EVIDENCE_*` result creates an Orca conflict gate and leaves the task incomplete.
@@ -34,5 +34,6 @@ This skill is a policy layer over the local `orchestrater` Node CLI and Orca. Re
 
 - `terminalTitle` is not a dispatch target; use the handle returned by `terminal resolve`.
 - Duplicate titles are blockers, never a selection heuristic.
+- Orca capability probe failure, scope hash mismatch, credential-shaped verification args, and verification-generated out-of-scope files are blockers/conflicts.
 - Do not auto-retry write tasks or overwrite an existing installation without `--force`.
 - CLI policy enforcement is auditable but not an OS sandbox. Use an isolated worktree or container when workers must be prevented from touching arbitrary ignored files.

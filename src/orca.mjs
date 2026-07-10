@@ -1,5 +1,29 @@
 import { runtimeError } from "./errors.mjs";
-import { runJson } from "./process.mjs";
+import { run, runJson } from "./process.mjs";
+
+export const REQUIRED_CAPABILITIES = Object.freeze([
+  { args: ["terminal", "list", "--help"], expected: "terminal list" },
+  { args: ["terminal", "create", "--help"], expected: "terminal create" },
+  { args: ["orchestration", "task-list", "--help"], expected: "--ready" },
+  { args: ["orchestration", "task-update", "--help"], expected: "--result" },
+  { args: ["orchestration", "dispatch", "--help"], expected: "--inject" },
+]);
+
+export async function probeCapabilities(command, cwd, runner = run) {
+  for (const capability of REQUIRED_CAPABILITIES) {
+    let result;
+    try {
+      result = await runner(command, capability.args, { cwd });
+    } catch (error) {
+      if (error.code === "ENOENT") throw runtimeError("E_RUNTIME_ORCA_MISSING", "Orca CLI is not installed", "install Orca before dispatching");
+      throw error;
+    }
+    if (result.exitCode !== 0 || !result.stdout.includes(capability.expected)) {
+      throw runtimeError("E_RUNTIME_ORCA_INCOMPATIBLE", `Orca capability missing: ${capability.args.slice(0, 2).join(" ")}`, "install an Orca CLI that supports the required orchestration commands");
+    }
+  }
+  return true;
+}
 
 function unwrap(result) {
   if (result.exitCode !== 0) {
@@ -34,6 +58,10 @@ export class OrcaClient {
       throw runtimeError("E_RUNTIME_ORCA_DOWN", "Orca runtime is not ready", "start Orca before dispatching");
     }
     return result;
+  }
+
+  capabilities() {
+    return probeCapabilities(this.command, this.cwd);
   }
 
   terminalList() {
