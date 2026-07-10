@@ -1,0 +1,5 @@
+{
+  "name": "orchestrater",
+  "description": "Orca-backed multi-agent coordination policy for Claude Code",
+  "version": "0.2.0"
+}

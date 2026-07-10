@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "coordinator": {
     "mode": "current-session"
   },
@@ -7,8 +7,8 @@
     "worktree": "active",
     "strategy": "plan-first",
     "autoCreateTerminals": true,
-    "onMissingRole": "broadcast",
-    "maxConcurrentWorkers": 2
+    "onMissingRole": "ask",
+    "maxConcurrentReadWorkers": 2
   },
   "permissions": {
     "writeModel": "single-writer",
@@ -16,6 +16,18 @@
     "defaultWriteRole": "implementation"
   },
   "roles": [
+    {
+      "name": "implementation",
+      "agent": "codex",
+      "command": "codex",
+      "terminalTitle": "orchestrater:implementation",
+      "session": "dedicated",
+      "writeAccess": true,
+      "responsibilities": [
+        "implement",
+        "run targeted verification"
+      ]
+    },
     {
       "name": "research",
       "agent": "agy",

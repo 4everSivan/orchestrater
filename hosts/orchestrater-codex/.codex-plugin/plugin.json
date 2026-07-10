@@ -1,0 +1,18 @@
+{
+  "name": "orchestrater-codex",
+  "version": "0.2.0",
+  "description": "Orca-backed multi-agent coordination policy for Codex",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Orchestrater Codex",
+    "shortDescription": "Coordinate Orca workers with auditable preflight and evidence.",
+    "longDescription": "Orchestrater Codex adds an Orca-backed coordination skill.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Use /orchestrater to coordinate an Orca multi-agent task safely."
+  }
+}
